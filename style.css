@@ -90,6 +90,13 @@ button:active {
   box-shadow: none;
 }
 
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  box-shadow: none;
+  transform: none;
+}
+
 .dice {
   display: flex;
   gap: 12px;
