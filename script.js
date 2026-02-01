@@ -1,6 +1,8 @@
 const POINTS = 24;
 const TOTAL_CHECKERS = 15;
 const STORAGE_KEY = "bg-save";
+const AI_MOVE_TOTAL_MS = 3000;
+const AI_MOVE_MIN_STEP_MS = 450;
 
 const state = {
   board: Array(POINTS).fill(0),
@@ -347,14 +349,9 @@ function runAiTurn() {
 
   const bestMoves = best.seq.moves;
   const moveSummary = bestMoves.map((move) => formatMove(move)).join(", ");
-  bestMoves.forEach((move) => {
-    applyMove(state, "ai", move);
-  });
   state.remainingDice = [];
-  state.message = `AI rolled ${state.dice.join(", ")}. Moves: ${moveSummary}.`;
-  highlightAiMoves(bestMoves);
-  if (checkWin("ai")) return;
-  startPlayerTurn();
+  state.message = `AI rolled ${state.dice.join(", ")}.`;
+  animateAiMoves(bestMoves, moveSummary);
 }
 
 function generateMoveSequences(currentState, player, dice) {
@@ -615,22 +612,35 @@ function restoreSnapshot(snapshot) {
   state.aiMoveHighlights = { from: [], to: [] };
 }
 
-function highlightAiMoves(moves) {
-  const from = new Set();
-  const to = new Set();
-  moves.forEach((move) => {
-    if (typeof move.from === "number") {
-      from.add(move.from);
+function animateAiMoves(moves, moveSummary) {
+  if (moves.length === 0) return;
+  const stepDelay = Math.max(
+    AI_MOVE_MIN_STEP_MS,
+    Math.floor(AI_MOVE_TOTAL_MS / moves.length),
+  );
+  let index = 0;
+
+  const applyNextMove = () => {
+    if (index >= moves.length) {
+      state.aiMoveHighlights = { from: [], to: [] };
+      state.message = `AI rolled ${state.dice.join(", ")}. Moves: ${moveSummary}.`;
+      render();
+      if (checkWin("ai")) return;
+      startPlayerTurn();
+      return;
     }
-    if (typeof move.to === "number") {
-      to.add(move.to);
-    }
-  });
-  state.aiMoveHighlights = { from: [...from], to: [...to] };
-  setTimeout(() => {
-    state.aiMoveHighlights = { from: [], to: [] };
+    const move = moves[index];
+    applyMove(state, "ai", move);
+    state.aiMoveHighlights = {
+      from: typeof move.from === "number" ? [move.from] : [],
+      to: typeof move.to === "number" ? [move.to] : [],
+    };
     render();
-  }, 900);
+    index += 1;
+    setTimeout(applyNextMove, stepDelay);
+  };
+
+  applyNextMove();
 }
 
 function saveStateToStorage() {
