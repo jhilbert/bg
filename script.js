@@ -11,6 +11,7 @@ const state = {
   remainingDice: [],
   selectedFrom: null,
   message: "",
+  awaitingRoll: false,
 };
 
 const elements = {
@@ -45,8 +46,11 @@ function initBoard() {
   state.off = { player: 0, ai: 0 };
   state.turn = "player";
   state.selectedFrom = null;
-  state.message = "";
-  rollForTurn();
+  state.dice = [];
+  state.remainingDice = [];
+  state.awaitingRoll = true;
+  state.message = "Click the dice to roll.";
+  render();
 }
 
 function rollDie() {
@@ -54,6 +58,7 @@ function rollDie() {
 }
 
 function rollForTurn() {
+  state.awaitingRoll = false;
   const die1 = rollDie();
   const die2 = rollDie();
   state.dice = die1 === die2 ? [die1, die1, die1, die1] : [die1, die2];
@@ -81,6 +86,10 @@ function render() {
   elements.playerOff.textContent = state.off.player;
   elements.aiOff.textContent = state.off.ai;
   elements.hint.textContent = state.message;
+  elements.dice.classList.toggle(
+    "awaiting",
+    state.turn === "player" && state.awaitingRoll,
+  );
 
   saveStateToStorage();
 }
@@ -168,6 +177,13 @@ function renderRow(container, points, row) {
 
 function renderDice() {
   elements.dice.innerHTML = "";
+  if (state.turn === "player" && state.awaitingRoll) {
+    const placeholder = document.createElement("div");
+    placeholder.className = "die placeholder";
+    placeholder.textContent = "Roll";
+    elements.dice.appendChild(placeholder);
+    return;
+  }
   const remainingCounts = state.remainingDice.reduce((acc, die) => {
     acc[die] = (acc[die] || 0) + 1;
     return acc;
@@ -188,6 +204,11 @@ function renderDice() {
 
 function handleBoardClick(event) {
   if (state.turn !== "player") return;
+  if (state.awaitingRoll) {
+    state.message = "Roll the dice to start your turn.";
+    render();
+    return;
+  }
   const pointEl = event.target.closest(".point");
   const barEl = event.target.closest(".bar");
 
@@ -231,6 +252,11 @@ function consumeDie(die) {
 
 function handleBearOff() {
   if (state.turn !== "player") return;
+  if (state.awaitingRoll) {
+    state.message = "Roll the dice before bearing off.";
+    render();
+    return;
+  }
   if (!state.selectedFrom || state.selectedFrom.type !== "point") {
     state.message = "Select a checker to bear off.";
     render();
@@ -255,6 +281,11 @@ function handleBearOff() {
 
 function endTurn() {
   if (state.turn !== "player") return;
+  if (state.awaitingRoll) {
+    state.message = "Roll the dice before ending your turn.";
+    render();
+    return;
+  }
   state.selectedFrom = null;
   state.turn = "ai";
   rollForTurn();
@@ -264,9 +295,8 @@ function runAiTurn() {
   if (state.turn !== "ai") return;
   const sequences = generateMoveSequences(state, "ai", state.remainingDice);
   if (sequences.length === 0) {
-    state.message = "AI has no moves.";
-    state.turn = "player";
-    rollForTurn();
+    state.message = `AI rolled ${state.dice.join(", ")} but has no moves.`;
+    startPlayerTurn();
     return;
   }
 
@@ -277,14 +307,14 @@ function runAiTurn() {
   }, null);
 
   const bestMoves = best.seq.moves;
+  const moveSummary = bestMoves.map((move) => formatMove(move)).join(", ");
   bestMoves.forEach((move) => {
     applyMove(state, "ai", move);
   });
   state.remainingDice = [];
-  state.message = "AI played its turn.";
+  state.message = `AI rolled ${state.dice.join(", ")}. Moves: ${moveSummary}.`;
   if (checkWin("ai")) return;
-  state.turn = "player";
-  rollForTurn();
+  startPlayerTurn();
 }
 
 function generateMoveSequences(currentState, player, dice) {
@@ -494,6 +524,22 @@ function capitalize(value) {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
+function formatMove(move) {
+  const from = move.from === "bar" ? "bar" : `point ${move.from + 1}`;
+  const to = move.to === "off" ? "off" : `point ${move.to + 1}`;
+  return `${from} → ${to} (${move.die})`;
+}
+
+function startPlayerTurn() {
+  state.turn = "player";
+  state.selectedFrom = null;
+  state.dice = [];
+  state.remainingDice = [];
+  state.awaitingRoll = true;
+  state.message += " Your turn—click the dice to roll.";
+  render();
+}
+
 function cloneState(currentState) {
   return {
     board: [...currentState.board],
@@ -502,6 +548,7 @@ function cloneState(currentState) {
     turn: currentState.turn,
     dice: [...currentState.dice],
     remainingDice: [...currentState.remainingDice],
+    awaitingRoll: currentState.awaitingRoll,
   };
 }
 
@@ -513,6 +560,7 @@ function saveStateToStorage() {
     turn: state.turn,
     dice: state.dice,
     remainingDice: state.remainingDice,
+    awaitingRoll: state.awaitingRoll,
   };
   localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
 }
@@ -531,6 +579,8 @@ function loadStateFromStorage() {
   state.turn = payload.turn;
   state.dice = payload.dice;
   state.remainingDice = payload.remainingDice;
+  state.awaitingRoll =
+    payload.awaitingRoll ?? (state.turn === "player" && state.remainingDice.length === 0);
   state.selectedFrom = null;
   state.message = "Loaded saved game.";
   render();
@@ -538,6 +588,10 @@ function loadStateFromStorage() {
 
 function setupListeners() {
   elements.board.addEventListener("click", handleBoardClick);
+  elements.dice.addEventListener("click", () => {
+    if (state.turn !== "player" || !state.awaitingRoll) return;
+    rollForTurn();
+  });
   elements.newGame.addEventListener("click", initBoard);
   elements.bearOff.addEventListener("click", handleBearOff);
   elements.endTurn.addEventListener("click", () => {
