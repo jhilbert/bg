@@ -95,6 +95,10 @@ button:active {
   gap: 12px;
 }
 
+.dice.awaiting {
+  cursor: pointer;
+}
+
 .die {
   width: 42px;
   height: 42px;
@@ -109,6 +113,15 @@ button:active {
 
 .die.used {
   opacity: 0.4;
+}
+
+.die.placeholder {
+  background: transparent;
+  border: 2px dashed rgba(248, 244, 236, 0.6);
+  color: rgba(248, 244, 236, 0.8);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
 }
 
 .hint {
