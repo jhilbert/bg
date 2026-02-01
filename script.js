@@ -16,6 +16,7 @@ const state = {
 const elements = {
   topRow: document.getElementById("top-row"),
   bottomRow: document.getElementById("bottom-row"),
+  board: document.getElementById("board"),
   dice: document.getElementById("dice"),
   turnLabel: document.getElementById("turn-label"),
   playerOff: document.getElementById("player-off"),
