@@ -12,6 +12,7 @@ const state = {
   selectedFrom: null,
   message: "",
   awaitingRoll: false,
+  aiMoveHighlights: { from: [], to: [] },
 };
 
 const elements = {
@@ -49,6 +50,7 @@ function initBoard() {
   state.dice = [];
   state.remainingDice = [];
   state.awaitingRoll = true;
+  state.aiMoveHighlights = { from: [], to: [] };
   state.message = "Click the dice to roll.";
   render();
 }
@@ -142,7 +144,7 @@ function renderRow(container, points, row) {
 
     const pointDiv = document.createElement("div");
     pointDiv.className = "point";
-    if (index % 2 === 1) {
+    if ((point + 1) % 2 === 0) {
       pointDiv.classList.add("dark");
     }
     if (point <= 5) {
@@ -154,6 +156,12 @@ function renderRow(container, points, row) {
     pointDiv.dataset.index = point;
     if (state.selectedFrom && state.selectedFrom.type === "point" && state.selectedFrom.index === point) {
       pointDiv.classList.add("selected");
+    }
+    if (state.aiMoveHighlights.from.includes(point)) {
+      pointDiv.classList.add("ai-move-from");
+    }
+    if (state.aiMoveHighlights.to.includes(point)) {
+      pointDiv.classList.add("ai-move-to");
     }
 
     const numberLabel = document.createElement("div");
@@ -318,6 +326,7 @@ function runAiTurn() {
   const sequences = generateMoveSequences(state, "ai", state.remainingDice);
   if (sequences.length === 0) {
     state.message = `AI rolled ${state.dice.join(", ")} but has no moves.`;
+    state.aiMoveHighlights = { from: [], to: [] };
     startPlayerTurn();
     return;
   }
@@ -335,6 +344,7 @@ function runAiTurn() {
   });
   state.remainingDice = [];
   state.message = `AI rolled ${state.dice.join(", ")}. Moves: ${moveSummary}.`;
+  highlightAiMoves(bestMoves);
   if (checkWin("ai")) return;
   startPlayerTurn();
 }
@@ -572,6 +582,24 @@ function cloneState(currentState) {
     remainingDice: [...currentState.remainingDice],
     awaitingRoll: currentState.awaitingRoll,
   };
+}
+
+function highlightAiMoves(moves) {
+  const from = new Set();
+  const to = new Set();
+  moves.forEach((move) => {
+    if (typeof move.from === "number") {
+      from.add(move.from);
+    }
+    if (typeof move.to === "number") {
+      to.add(move.to);
+    }
+  });
+  state.aiMoveHighlights = { from: [...from], to: [...to] };
+  setTimeout(() => {
+    state.aiMoveHighlights = { from: [], to: [] };
+    render();
+  }, 900);
 }
 
 function saveStateToStorage() {
