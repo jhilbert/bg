@@ -13,6 +13,7 @@ const state = {
   message: "",
   awaitingRoll: false,
   aiMoveHighlights: { from: [], to: [] },
+  lastMoveSnapshot: null,
 };
 
 const elements = {
@@ -26,6 +27,7 @@ const elements = {
   hint: document.getElementById("hint"),
   newGame: document.getElementById("new-game"),
   endTurn: document.getElementById("end-turn"),
+  undoMove: document.getElementById("undo-move"),
   bearOff: document.getElementById("bear-off"),
   save: document.getElementById("save"),
   load: document.getElementById("load"),
@@ -51,6 +53,7 @@ function initBoard() {
   state.remainingDice = [];
   state.awaitingRoll = true;
   state.aiMoveHighlights = { from: [], to: [] };
+  state.lastMoveSnapshot = null;
   state.message = "Click the dice to roll.";
   render();
 }
@@ -92,6 +95,8 @@ function render() {
     "awaiting",
     state.turn === "player" && state.awaitingRoll,
   );
+  elements.undoMove.disabled =
+    state.turn !== "player" || state.awaitingRoll || !state.lastMoveSnapshot;
 
   saveStateToStorage();
 }
@@ -257,6 +262,7 @@ function handleBoardClick(event) {
     }
     const move = findLegalMove("player", state.selectedFrom, { type: "point", index });
     if (move) {
+      state.lastMoveSnapshot = createSnapshot(state);
       applyMove(state, "player", move);
       consumeDie(move.die);
       state.selectedFrom = null;
@@ -300,6 +306,7 @@ function handleBearOff() {
     return;
   }
 
+  state.lastMoveSnapshot = createSnapshot(state);
   applyMove(state, "player", move);
   consumeDie(move.die);
   state.selectedFrom = null;
@@ -317,6 +324,7 @@ function endTurn() {
     return;
   }
   state.selectedFrom = null;
+  state.lastMoveSnapshot = null;
   state.turn = "ai";
   rollForTurn();
 }
@@ -568,6 +576,7 @@ function startPlayerTurn() {
   state.dice = [];
   state.remainingDice = [];
   state.awaitingRoll = true;
+  state.lastMoveSnapshot = null;
   state.message += " Your turn—click the dice to roll.";
   render();
 }
@@ -582,6 +591,28 @@ function cloneState(currentState) {
     remainingDice: [...currentState.remainingDice],
     awaitingRoll: currentState.awaitingRoll,
   };
+}
+
+function createSnapshot(currentState) {
+  return {
+    board: [...currentState.board],
+    bar: { ...currentState.bar },
+    off: { ...currentState.off },
+    dice: [...currentState.dice],
+    remainingDice: [...currentState.remainingDice],
+    awaitingRoll: currentState.awaitingRoll,
+  };
+}
+
+function restoreSnapshot(snapshot) {
+  state.board = [...snapshot.board];
+  state.bar = { ...snapshot.bar };
+  state.off = { ...snapshot.off };
+  state.dice = [...snapshot.dice];
+  state.remainingDice = [...snapshot.remainingDice];
+  state.awaitingRoll = snapshot.awaitingRoll;
+  state.selectedFrom = null;
+  state.aiMoveHighlights = { from: [], to: [] };
 }
 
 function highlightAiMoves(moves) {
@@ -633,6 +664,7 @@ function loadStateFromStorage() {
     payload.awaitingRoll ?? (state.turn === "player" && state.remainingDice.length === 0);
   state.selectedFrom = null;
   state.message = "Loaded saved game.";
+  state.lastMoveSnapshot = null;
   render();
 }
 
@@ -647,6 +679,13 @@ function setupListeners() {
   elements.endTurn.addEventListener("click", () => {
     state.message = "Turn ended.";
     endTurn();
+  });
+  elements.undoMove.addEventListener("click", () => {
+    if (!state.lastMoveSnapshot || state.turn !== "player") return;
+    restoreSnapshot(state.lastMoveSnapshot);
+    state.lastMoveSnapshot = null;
+    state.message = "Last move undone.";
+    render();
   });
   elements.save.addEventListener("click", () => {
     saveStateToStorage();
