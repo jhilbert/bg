@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Backgammon</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>Backgammon</h1>
+      <p class="subtitle">Single-player vs. the computer</p>
+    </header>
+
+    <section class="info-panel">
+      <div class="status">
+        <div><strong>Turn:</strong> <span id="turn-label"></span></div>
+        <div><strong>Player Off:</strong> <span id="player-off"></span></div>
+        <div><strong>AI Off:</strong> <span id="ai-off"></span></div>
+      </div>
+      <div class="dice" id="dice"></div>
+      <div class="controls">
+        <button id="new-game">New Game</button>
+        <button id="end-turn">End Turn</button>
+        <button id="bear-off">Bear Off</button>
+        <button id="save">Save</button>
+        <button id="load">Load</button>
+      </div>
+      <div class="hint" id="hint"></div>
+    </section>
+
+    <section class="board" id="board">
+      <div class="row top" id="top-row"></div>
+      <div class="row bottom" id="bottom-row"></div>
+    </section>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>
