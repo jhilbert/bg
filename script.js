@@ -145,10 +145,21 @@ function renderRow(container, points, row) {
     if (index % 2 === 1) {
       pointDiv.classList.add("dark");
     }
+    if (point <= 5) {
+      pointDiv.classList.add("home-player");
+    }
+    if (point >= 18) {
+      pointDiv.classList.add("home-ai");
+    }
     pointDiv.dataset.index = point;
     if (state.selectedFrom && state.selectedFrom.type === "point" && state.selectedFrom.index === point) {
       pointDiv.classList.add("selected");
     }
+
+    const numberLabel = document.createElement("div");
+    numberLabel.className = "point-number";
+    numberLabel.textContent = point + 1;
+    pointDiv.appendChild(numberLabel);
 
     const stack = document.createElement("div");
     stack.className = "checker-stack";
@@ -214,8 +225,13 @@ function handleBoardClick(event) {
 
   if (barEl && barEl.dataset.bar === "player") {
     if (state.bar.player > 0) {
-      state.selectedFrom = { type: "bar" };
-      state.message = "Selected checker from bar.";
+      if (state.selectedFrom && state.selectedFrom.type === "bar") {
+        state.selectedFrom = null;
+        state.message = "Selection cleared.";
+      } else {
+        state.selectedFrom = { type: "bar" };
+        state.message = "Selected checker from bar.";
+      }
       render();
     }
     return;
@@ -225,6 +241,12 @@ function handleBoardClick(event) {
   const index = Number(pointEl.dataset.index);
 
   if (state.selectedFrom) {
+    if (state.selectedFrom.type === "point" && state.selectedFrom.index === index) {
+      state.selectedFrom = null;
+      state.message = "Selection cleared.";
+      render();
+      return;
+    }
     const move = findLegalMove("player", state.selectedFrom, { type: "point", index });
     if (move) {
       applyMove(state, "player", move);

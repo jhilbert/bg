@@ -163,6 +163,31 @@ button:active {
   background: linear-gradient(180deg, #6f4f39, #3d2a20);
 }
 
+.point.home-player {
+  box-shadow: inset 0 0 0 2px rgba(244, 185, 95, 0.55);
+}
+
+.point.home-ai {
+  box-shadow: inset 0 0 0 2px rgba(86, 207, 225, 0.55);
+}
+
+.point-number {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: rgba(248, 244, 236, 0.85);
+  background: rgba(0, 0, 0, 0.35);
+  padding: 2px 6px;
+  border-radius: 10px;
+}
+
+.row.bottom .point-number {
+  top: auto;
+  bottom: 6px;
+}
+
 .bar {
   background: var(--dark);
   border-radius: 12px;
