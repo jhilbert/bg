@@ -73,6 +73,20 @@ function rollForTurn() {
   state.message = `${capitalize(state.turn)} rolled ${state.dice.join(", ")}.`;
   render();
 
+  if (
+    state.turn === "player" &&
+    !hasAnyLegalMoves(state, "player", state.remainingDice)
+  ) {
+    state.message = `Player rolled ${state.dice.join(
+      ", ",
+    )} but has no moves. Roll again.`;
+    state.dice = [];
+    state.remainingDice = [];
+    state.awaitingRoll = true;
+    render();
+    return;
+  }
+
   if (state.turn === "ai") {
     setTimeout(runAiTurn, 500);
   }
@@ -375,6 +389,11 @@ function generateMoveSequences(currentState, player, dice) {
   }
 
   return filtered;
+}
+
+function hasAnyLegalMoves(currentState, player, dice) {
+  if (dice.length === 0) return false;
+  return generateMoveSequences(currentState, player, dice).length > 0;
 }
 
 function recurseMoves(currentState, player, diceLeft, movesSoFar, sequences) {
