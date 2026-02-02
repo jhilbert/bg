@@ -412,7 +412,7 @@ function recurseMoves(currentState, player, diceLeft, movesSoFar, sequences) {
     });
   }
 
-  if (!anyMove) {
+  if (!anyMove && movesSoFar.length > 0) {
     sequences.push({ moves: movesSoFar, state: currentState });
   }
 }
