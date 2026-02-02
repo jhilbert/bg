@@ -482,7 +482,8 @@ function allCheckersInHome(currentState, player) {
     }
   }
   const barCount = currentState.bar[player];
-  return count + barCount === TOTAL_CHECKERS;
+  const offCount = currentState.off[player];
+  return count + barCount + offCount === TOTAL_CHECKERS;
 }
 
 function applyMove(currentState, player, move) {
