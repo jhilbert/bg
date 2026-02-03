@@ -3,7 +3,7 @@ const TOTAL_CHECKERS = 15;
 const STORAGE_KEY = "bg-save";
 const AI_MOVE_TOTAL_MS = 3000;
 const AI_MOVE_MIN_STEP_MS = 450;
-const COMMIT_VERSION = "fe84e6d";
+const COMMIT_VERSION = "e325be3";
 
 const state = {
   board: Array(POINTS).fill(0),
@@ -349,6 +349,11 @@ function endTurn() {
     render();
     return;
   }
+  if (hasAnyLegalMoves(state, "player", state.remainingDice)) {
+    state.message = "You must play all usable dice before ending your turn.";
+    render();
+    return;
+  }
   state.selectedFrom = null;
   state.lastMoveSnapshot = null;
   state.turn = "ai";
@@ -395,7 +400,10 @@ function generateMoveSequences(currentState, player, dice) {
 
   if (dice.length === 2 && dice[0] !== dice[1] && maxMoves === 1) {
     const high = Math.max(...dice);
-    filtered = filtered.filter((seq) => seq.moves[0].die === high);
+    const hasHigh = filtered.some((seq) => seq.moves[0].die === high);
+    if (hasHigh) {
+      filtered = filtered.filter((seq) => seq.moves[0].die === high);
+    }
   }
 
   return filtered;
@@ -543,11 +551,9 @@ function applyMove(currentState, player, move) {
 }
 
 function findLegalMove(player, from, to) {
-  for (const die of state.remainingDice) {
-    const moves = getLegalMoves(state, player, die);
-    const match = moves.find((move) => matchMove(move, from, to));
-    if (match) return match;
-  }
+  const allowedMoves = getAllowedFirstMoves(state, player, state.remainingDice);
+  const match = allowedMoves.find((move) => matchMove(move, from, to));
+  if (match) return match;
   return null;
 }
 
@@ -558,6 +564,12 @@ function matchMove(move, from, to) {
   if (to.type === "point" && move.to !== to.index) return false;
   if (to.type === "off" && move.to !== "off") return false;
   return true;
+}
+
+function getAllowedFirstMoves(currentState, player, dice) {
+  const sequences = generateMoveSequences(currentState, player, dice);
+  if (sequences.length === 0) return [];
+  return sequences.map((seq) => seq.moves[0]).filter(Boolean);
 }
 
 function calculatePipCount(currentState, player) {
