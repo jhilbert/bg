@@ -3,7 +3,7 @@ const TOTAL_CHECKERS = 15;
 const STORAGE_KEY = "bg-save";
 const AI_MOVE_TOTAL_MS = 3000;
 const AI_MOVE_MIN_STEP_MS = 450;
-const COMMIT_VERSION = "ac6609f";
+const COMMIT_VERSION = "dc992a6";
 
 const state = {
   board: Array(POINTS).fill(0),
@@ -63,6 +63,11 @@ function initBoard() {
 }
 
 function rollDie() {
+  if (window.crypto && window.crypto.getRandomValues) {
+    const array = new Uint32Array(1);
+    window.crypto.getRandomValues(array);
+    return (array[0] % 6) + 1;
+  }
   return Math.floor(Math.random() * 6) + 1;
 }
 
