@@ -36,6 +36,7 @@ header {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
+  position: relative;
 }
 
 h1 {
@@ -142,6 +143,20 @@ button:disabled {
   padding: 16px;
   display: grid;
   gap: 12px;
+}
+
+.commit-version {
+  position: absolute;
+  top: -6px;
+  right: 0;
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(248, 244, 236, 0.75);
+  background: rgba(19, 44, 63, 0.75);
+  padding: 4px 8px;
+  border-radius: 999px;
+  z-index: 2;
 }
 
 .row {
