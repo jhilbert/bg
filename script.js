@@ -3,6 +3,7 @@ const TOTAL_CHECKERS = 15;
 const STORAGE_KEY = "bg-save";
 const AI_MOVE_TOTAL_MS = 3000;
 const AI_MOVE_MIN_STEP_MS = 450;
+const COMMIT_VERSION = "be18549";
 
 const state = {
   board: Array(POINTS).fill(0),
@@ -33,6 +34,7 @@ const elements = {
   bearOff: document.getElementById("bear-off"),
   save: document.getElementById("save"),
   load: document.getElementById("load"),
+  commitVersion: document.getElementById("commit-version"),
 };
 
 function initBoard() {
@@ -107,6 +109,9 @@ function render() {
   elements.playerOff.textContent = state.off.player;
   elements.aiOff.textContent = state.off.ai;
   elements.hint.textContent = state.message;
+  if (elements.commitVersion) {
+    elements.commitVersion.textContent = `v${COMMIT_VERSION}`;
+  }
   elements.dice.classList.toggle(
     "awaiting",
     state.turn === "player" && state.awaitingRoll,
