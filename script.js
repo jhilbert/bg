@@ -3,7 +3,7 @@ const TOTAL_CHECKERS = 15;
 const STORAGE_KEY = "bg-save";
 const AI_MOVE_TOTAL_MS = 3000;
 const AI_MOVE_MIN_STEP_MS = 450;
-const COMMIT_VERSION = "dc992a6";
+const COMMIT_VERSION = "fe84e6d";
 
 const state = {
   board: Array(POINTS).fill(0),
@@ -560,22 +560,117 @@ function matchMove(move, from, to) {
   return true;
 }
 
-function evaluateState(currentState) {
-  const aiOffScore = currentState.off.ai * 100;
-  const playerOffScore = currentState.off.player * -100;
-  const barScore = currentState.bar.player * 12 - currentState.bar.ai * 10;
-  let blotScore = 0;
-  let pointScore = 0;
-
+function calculatePipCount(currentState, player) {
+  let total = 0;
   for (let i = 0; i < POINTS; i += 1) {
-    const val = currentState.board[i];
-    if (val === -1) blotScore -= 4;
-    if (val === 1) blotScore += 3;
-    if (val <= -2) pointScore += 2;
-    if (val >= 2) pointScore -= 1;
+    const count = currentState.board[i];
+    if (player === "player" && count > 0) {
+      total += count * (i + 1);
+    }
+    if (player === "ai" && count < 0) {
+      total += Math.abs(count) * (POINTS - i);
+    }
   }
+  const barCount = currentState.bar[player];
+  if (barCount > 0) {
+    total += barCount * (POINTS + 1);
+  }
+  return total;
+}
 
-  return aiOffScore + playerOffScore + barScore + blotScore + pointScore;
+function countMadePoints(currentState, player, startIndex, endIndex) {
+  let count = 0;
+  for (let i = startIndex; i <= endIndex; i += 1) {
+    const value = currentState.board[i];
+    if (player === "player" && value >= 2) count += 1;
+    if (player === "ai" && value <= -2) count += 1;
+  }
+  return count;
+}
+
+function longestPrime(currentState, player) {
+  let best = 0;
+  let current = 0;
+  for (let i = 0; i < POINTS; i += 1) {
+    const value = currentState.board[i];
+    const isPoint =
+      (player === "player" && value >= 2) || (player === "ai" && value <= -2);
+    if (isPoint) {
+      current += 1;
+      if (current > best) best = current;
+    } else {
+      current = 0;
+    }
+  }
+  return best;
+}
+
+function countBlots(currentState, player) {
+  let count = 0;
+  for (let i = 0; i < POINTS; i += 1) {
+    const value = currentState.board[i];
+    if (player === "player" && value === 1) count += 1;
+    if (player === "ai" && value === -1) count += 1;
+  }
+  return count;
+}
+
+function countVulnerableBlots(currentState, player) {
+  let count = 0;
+  for (let i = 0; i < POINTS; i += 1) {
+    const value = currentState.board[i];
+    if (player === "ai" && value === -1) {
+      const maxIndex = Math.min(POINTS - 1, i + 6);
+      for (let j = i + 1; j <= maxIndex; j += 1) {
+        if (currentState.board[j] > 0) {
+          count += 1;
+          break;
+        }
+      }
+    }
+    if (player === "player" && value === 1) {
+      const minIndex = Math.max(0, i - 6);
+      for (let j = i - 1; j >= minIndex; j -= 1) {
+        if (currentState.board[j] < 0) {
+          count += 1;
+          break;
+        }
+      }
+    }
+  }
+  return count;
+}
+
+function evaluateState(currentState) {
+  const aiOffScore = currentState.off.ai * 120;
+  const playerOffScore = currentState.off.player * -120;
+  const barScore = currentState.bar.player * 15 - currentState.bar.ai * 20;
+  const aiPip = calculatePipCount(currentState, "ai");
+  const playerPip = calculatePipCount(currentState, "player");
+  const pipScore = (playerPip - aiPip) * 1.5;
+  const aiHomePoints = countMadePoints(currentState, "ai", 18, 23);
+  const playerHomePoints = countMadePoints(currentState, "player", 0, 5);
+  const homeBoardScore = aiHomePoints * 4 - playerHomePoints * 3;
+  const aiPrime = longestPrime(currentState, "ai");
+  const playerPrime = longestPrime(currentState, "player");
+  const primeScore = aiPrime * 8 - playerPrime * 6;
+  const aiBlots = countBlots(currentState, "ai");
+  const playerBlots = countBlots(currentState, "player");
+  const blotScore = playerBlots * 5 - aiBlots * 7;
+  const aiVulnerable = countVulnerableBlots(currentState, "ai");
+  const playerVulnerable = countVulnerableBlots(currentState, "player");
+  const vulnerabilityScore = playerVulnerable * 6 - aiVulnerable * 10;
+
+  return (
+    aiOffScore +
+    playerOffScore +
+    barScore +
+    pipScore +
+    homeBoardScore +
+    primeScore +
+    blotScore +
+    vulnerabilityScore
+  );
 }
 
 function checkWin(player) {
