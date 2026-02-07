@@ -93,19 +93,19 @@
         <section class="network-panel" id="network-panel" hidden>
           <h2>Online PvP</h2>
           <p class="network-status" id="network-status">Not connected.</p>
-          <div class="network-actions">
-            <button id="host-offer" class="button-primary">Create Invite</button>
-            <button id="apply-signal" class="button-secondary">Apply Code</button>
+          <div class="network-wizard">
+            <button id="copy-invite" class="button-primary">Copy Invite Link</button>
+            <button id="join-link" class="button-secondary">Paste Link and Join</button>
             <button id="disconnect-peer" class="button-secondary">Disconnect</button>
           </div>
-          <label for="signal-input" class="network-label">Paste invite or answer URL/code</label>
+          <label for="signal-input" class="network-label">Paste invite link here</label>
           <textarea id="signal-input" rows="3" spellcheck="false"></textarea>
-          <label for="signal-output" class="network-label">Generated URL/code</label>
+          <label for="signal-output" class="network-label">Share this link back</label>
           <textarea id="signal-output" rows="3" spellcheck="false" readonly></textarea>
-          <button id="copy-signal" class="button-secondary">Copy Generated Code</button>
           <p class="network-help">
-            Host creates invite URL (<code>?offer=...</code>), guest pastes and applies to generate
-            answer URL (<code>?answer=...</code>), host pastes answer and applies.
+            Step 1: Copy Invite Link and send it to your opponent. Step 2: they paste it and click
+            Paste Link and Join (it generates a return link). Step 3: paste the return link and
+            click Paste Link and Join to connect.
           </p>
         </section>
       </section>

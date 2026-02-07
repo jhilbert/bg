@@ -67,12 +67,11 @@ const elements = {
   gameMode: document.getElementById("game-mode"),
   networkPanel: document.getElementById("network-panel"),
   networkStatus: document.getElementById("network-status"),
-  hostOffer: document.getElementById("host-offer"),
-  applySignal: document.getElementById("apply-signal"),
+  copyInvite: document.getElementById("copy-invite"),
+  joinLink: document.getElementById("join-link"),
   disconnectPeer: document.getElementById("disconnect-peer"),
   signalInput: document.getElementById("signal-input"),
   signalOutput: document.getElementById("signal-output"),
-  copySignal: document.getElementById("copy-signal"),
   commitVersion: document.getElementById("commit-version"),
 };
 
@@ -1138,11 +1137,11 @@ function updateNetworkStatus(forcedMessage) {
     return;
   }
   if (rtc.role === "host" && rtc.pc) {
-    elements.networkStatus.textContent = "Host session created. Waiting for answer.";
+    elements.networkStatus.textContent = "Invite created. Waiting for your opponent.";
     return;
   }
   if (rtc.role === "guest" && rtc.pc) {
-    elements.networkStatus.textContent = "Answer created. Waiting for host to connect.";
+    elements.networkStatus.textContent = "Return link created. Waiting for host.";
     return;
   }
   elements.networkStatus.textContent = "No active session.";
@@ -1232,7 +1231,7 @@ function parseSignalInput(rawValue) {
     // ignore and continue
   }
 
-  throw new Error("Could not parse signal code. Use a URL with ?offer=... or ?answer=...");
+  throw new Error("Could not parse link. Use the invite/return link with ?offer=... or ?answer=...");
 }
 
 function waitForIceGatheringComplete(pc, timeoutMs = 12000) {
@@ -1396,8 +1395,8 @@ async function createOfferSignal() {
   if (elements.signalOutput) {
     elements.signalOutput.value = url;
   }
-  state.message = "Offer created. Share this URL with your opponent.";
-  updateNetworkStatus("Offer created. Waiting for answer.");
+  state.message = "Invite link created. Share it with your opponent.";
+  updateNetworkStatus("Invite created. Waiting for your opponent.");
   render();
 }
 
@@ -1415,8 +1414,8 @@ async function acceptOfferSignal(descriptor) {
   if (elements.signalOutput) {
     elements.signalOutput.value = url;
   }
-  state.message = "Offer accepted. Send the answer URL back to the host.";
-  updateNetworkStatus("Answer created. Waiting for host.");
+  state.message = "Return link created. Send it back to the host.";
+  updateNetworkStatus("Return link created. Waiting for host.");
   render();
 }
 
@@ -1425,8 +1424,8 @@ async function acceptAnswerSignal(descriptor) {
     throw new Error("Create an offer first, then apply the answer.");
   }
   await rtc.pc.setRemoteDescription(descriptor);
-  state.message = "Answer applied. Waiting for peer connection.";
-  updateNetworkStatus("Answer applied. Connecting...");
+  state.message = "Return link applied. Waiting for peer connection.";
+  updateNetworkStatus("Connecting...");
   render();
 }
 
@@ -1439,12 +1438,30 @@ function disconnectPeerSession() {
   render();
 }
 
-async function handleApplySignal() {
+async function copySignalOutput(successMessage) {
+  const code = elements.signalOutput?.value.trim() || "";
+  if (!code) {
+    state.message = "No link to copy yet.";
+    render();
+    return false;
+  }
+  try {
+    await navigator.clipboard.writeText(code);
+    state.message = successMessage || "Link copied.";
+  } catch (error) {
+    state.message = "Clipboard copy failed. Copy manually.";
+  }
+  render();
+  return true;
+}
+
+async function handleJoinLink() {
   try {
     const parsed = parseSignalInput(elements.signalInput?.value || "");
     if (!parsed) return;
     if (parsed.kind === "offer") {
       await acceptOfferSignal(parsed.descriptor);
+      await copySignalOutput("Return link copied. Send it back to the host.");
     } else {
       await acceptAnswerSignal(parsed.descriptor);
     }
@@ -1486,8 +1503,8 @@ function prefillSignalFromQuery() {
     elements.signalInput.value = window.location.search;
   }
   state.message = offer
-    ? "Invite code detected. Click Apply Code to join as guest."
-    : "Answer code detected. Host: click Apply Code.";
+    ? "Invite link detected. Click Paste Link and Join to join."
+    : "Return link detected. Host: click Paste Link and Join.";
 }
 
 function handleKeyboardShortcut(event) {
@@ -1602,31 +1619,17 @@ function setupListeners() {
   elements.gameMode.addEventListener("change", (event) => {
     switchGameMode(event.target.value);
   });
-  elements.hostOffer.addEventListener("click", async () => {
+  elements.copyInvite.addEventListener("click", async () => {
     try {
       await createOfferSignal();
+      await copySignalOutput("Invite link copied. Send it to your opponent.");
     } catch (error) {
       state.message = error.message || "Failed to create offer.";
       render();
     }
   });
-  elements.applySignal.addEventListener("click", handleApplySignal);
+  elements.joinLink.addEventListener("click", handleJoinLink);
   elements.disconnectPeer.addEventListener("click", disconnectPeerSession);
-  elements.copySignal.addEventListener("click", async () => {
-    const code = elements.signalOutput.value.trim();
-    if (!code) {
-      state.message = "No generated code to copy.";
-      render();
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(code);
-      state.message = "Generated code copied.";
-    } catch (error) {
-      state.message = "Clipboard copy failed. Copy manually.";
-    }
-    render();
-  });
   document.addEventListener("keydown", handleKeyboardShortcut);
 }
 

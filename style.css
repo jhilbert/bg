@@ -524,7 +524,7 @@ button kbd {
   color: #3f5259;
 }
 
-.network-actions {
+.network-wizard {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
@@ -872,7 +872,7 @@ button kbd {
     grid-template-columns: 1fr;
   }
 
-  .network-actions {
+  .network-wizard {
     grid-template-columns: 1fr;
   }
 
