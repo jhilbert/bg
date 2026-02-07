@@ -4,40 +4,122 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Backgammon</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Manrope:wght@500;600;700;800&display=swap"
+    rel="stylesheet"
+  />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
+  <div class="ambient ambient-a" aria-hidden="true"></div>
+  <div class="ambient ambient-b" aria-hidden="true"></div>
+
   <div class="app">
-    <header>
-      <h1>Backgammon</h1>
-      <p class="subtitle">Single-player vs. the computer</p>
-      <div class="commit-version" id="commit-version" aria-label="Commit version"></div>
+    <header class="app-header">
+      <div class="header-title">
+        <p class="eyebrow">Classic Strategy</p>
+        <h1>Backgammon</h1>
+        <p class="subtitle" id="subtitle">Single-player vs. the computer</p>
+      </div>
+      <div class="header-right">
+        <div class="header-meta">
+          <div class="turn-pill">
+            <span class="label">Turn</span>
+            <span id="turn-label"></span>
+          </div>
+          <div class="commit-version" id="commit-version" aria-label="Commit version"></div>
+        </div>
+        <section class="top-log-panel" aria-live="polite">
+          <span class="top-log-label">Game Log</span>
+          <p class="hint top-hint" id="hint"></p>
+        </section>
+      </div>
     </header>
 
-    <section class="info-panel">
-      <div class="status">
-        <div><strong>Turn:</strong> <span id="turn-label"></span></div>
-        <div><strong>Player Off:</strong> <span id="player-off"></span></div>
-        <div><strong>AI Off:</strong> <span id="ai-off"></span></div>
-      </div>
-      <div class="dice" id="dice"></div>
-      <div class="controls">
-        <button id="new-game">New Game</button>
-        <button id="end-turn">End Turn</button>
-        <button id="undo-move">Undo Move</button>
-        <button id="bear-off">Bear Off</button>
-        <button id="save">Save</button>
-        <button id="load">Load</button>
-      </div>
-      <div class="hint" id="hint"></div>
-    </section>
+    <main class="layout">
+      <section class="side-panel" aria-label="Game controls and status">
+        <div class="status-grid">
+          <article class="stat-card player">
+            <h2 id="player-title">Player</h2>
+            <div class="stat-line"><span>Borne Off</span><strong id="player-off">0</strong></div>
+            <div class="stat-line"><span>On Bar</span><strong id="player-bar">0</strong></div>
+            <div class="stat-line"><span>Pip Count</span><strong id="player-pip">0</strong></div>
+            <div class="off-meter" aria-hidden="true">
+              <div class="off-fill player-fill" id="player-off-fill"></div>
+            </div>
+          </article>
 
-    <section class="board" id="board">
-      <div class="row top" id="top-row"></div>
-      <div class="row bottom" id="bottom-row"></div>
-    </section>
+          <article class="stat-card ai">
+            <h2 id="opponent-title">Computer</h2>
+            <div class="stat-line"><span>Borne Off</span><strong id="ai-off">0</strong></div>
+            <div class="stat-line"><span>On Bar</span><strong id="ai-bar">0</strong></div>
+            <div class="stat-line"><span>Pip Count</span><strong id="ai-pip">0</strong></div>
+            <div class="off-meter" aria-hidden="true">
+              <div class="off-fill ai-fill" id="ai-off-fill"></div>
+            </div>
+          </article>
+        </div>
+
+        <section class="dice-panel">
+          <div class="panel-header">
+            <h2>Dice</h2>
+            <span class="remaining" id="remaining-dice">0 left</span>
+          </div>
+          <div class="dice" id="dice" role="button" tabindex="0" aria-label="Dice tray"></div>
+          <p class="dice-help">Click the tray or press Enter to roll.</p>
+        </section>
+
+        <section class="controls-panel">
+          <h2>Actions</h2>
+          <div class="mode-row">
+            <label for="game-mode">Mode</label>
+            <select id="game-mode">
+              <option value="ai">Vs Computer</option>
+              <option value="p2p">Online PvP (WebRTC)</option>
+            </select>
+          </div>
+          <div class="controls">
+            <button id="new-game" class="button-primary" title="Shortcut: N">New Game <kbd>N</kbd></button>
+            <button id="end-turn" class="button-accent" title="Shortcut: E">End Turn <kbd>E</kbd></button>
+            <button id="undo-move" class="button-secondary" title="Shortcut: U">Undo <kbd>U</kbd></button>
+            <button id="bear-off" class="button-secondary" title="Shortcut: B">Bear Off <kbd>B</kbd></button>
+            <button id="save" class="button-secondary" title="Shortcut: S">Save <kbd>S</kbd></button>
+            <button id="load" class="button-secondary" title="Shortcut: L">Load <kbd>L</kbd></button>
+          </div>
+        </section>
+
+        <section class="network-panel" id="network-panel" hidden>
+          <h2>Online PvP</h2>
+          <p class="network-status" id="network-status">Not connected.</p>
+          <div class="network-actions">
+            <button id="host-offer" class="button-primary">Create Invite</button>
+            <button id="apply-signal" class="button-secondary">Apply Code</button>
+            <button id="disconnect-peer" class="button-secondary">Disconnect</button>
+          </div>
+          <label for="signal-input" class="network-label">Paste invite or answer URL/code</label>
+          <textarea id="signal-input" rows="3" spellcheck="false"></textarea>
+          <label for="signal-output" class="network-label">Generated URL/code</label>
+          <textarea id="signal-output" rows="3" spellcheck="false" readonly></textarea>
+          <button id="copy-signal" class="button-secondary">Copy Generated Code</button>
+          <p class="network-help">
+            Host creates invite URL (<code>?offer=...</code>), guest pastes and applies to generate
+            answer URL (<code>?answer=...</code>), host pastes answer and applies.
+          </p>
+        </section>
+      </section>
+
+      <section class="board-stage">
+        <div class="board-frame">
+          <section class="board" id="board" aria-label="Backgammon board">
+            <div class="row top" id="top-row"></div>
+            <div class="row bottom" id="bottom-row"></div>
+          </section>
+        </div>
+      </section>
+    </main>
   </div>
-  <div class="commit-version" id="commit-version"></div>
 
   <script src="script.js"></script>
 </body>

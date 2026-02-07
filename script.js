@@ -4,6 +4,9 @@ const STORAGE_KEY = "bg-save";
 const AI_MOVE_TOTAL_MS = 3000;
 const AI_MOVE_MIN_STEP_MS = 450;
 const COMMIT_VERSION = "e325be3";
+const RTC_CONFIG = {
+  iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+};
 
 const state = {
   board: Array(POINTS).fill(0),
@@ -17,6 +20,23 @@ const state = {
   awaitingRoll: false,
   aiMoveHighlights: { from: [], to: [] },
   lastMoveSnapshot: null,
+  legalPointTargets: [],
+  canBearOffSelection: false,
+  allowedSelectionDice: [],
+  openingRollPending: true,
+  diceOwners: [],
+  gameMode: "ai",
+  localSide: "player",
+  remoteSyncInProgress: false,
+  lastSyncedPayload: "",
+};
+
+const rtc = {
+  pc: null,
+  channel: null,
+  role: null,
+  connected: false,
+  generatedSignal: "",
 };
 
 const elements = {
@@ -27,6 +47,16 @@ const elements = {
   turnLabel: document.getElementById("turn-label"),
   playerOff: document.getElementById("player-off"),
   aiOff: document.getElementById("ai-off"),
+  subtitle: document.getElementById("subtitle"),
+  playerTitle: document.getElementById("player-title"),
+  opponentTitle: document.getElementById("opponent-title"),
+  playerBar: document.getElementById("player-bar"),
+  aiBar: document.getElementById("ai-bar"),
+  playerPip: document.getElementById("player-pip"),
+  aiPip: document.getElementById("ai-pip"),
+  remainingDice: document.getElementById("remaining-dice"),
+  playerOffFill: document.getElementById("player-off-fill"),
+  aiOffFill: document.getElementById("ai-off-fill"),
   hint: document.getElementById("hint"),
   newGame: document.getElementById("new-game"),
   endTurn: document.getElementById("end-turn"),
@@ -34,8 +64,42 @@ const elements = {
   bearOff: document.getElementById("bear-off"),
   save: document.getElementById("save"),
   load: document.getElementById("load"),
+  gameMode: document.getElementById("game-mode"),
+  networkPanel: document.getElementById("network-panel"),
+  networkStatus: document.getElementById("network-status"),
+  hostOffer: document.getElementById("host-offer"),
+  applySignal: document.getElementById("apply-signal"),
+  disconnectPeer: document.getElementById("disconnect-peer"),
+  signalInput: document.getElementById("signal-input"),
+  signalOutput: document.getElementById("signal-output"),
+  copySignal: document.getElementById("copy-signal"),
   commitVersion: document.getElementById("commit-version"),
 };
+
+function otherSide(side) {
+  return side === "player" ? "ai" : "player";
+}
+
+function capitalizeSide(side) {
+  if (state.gameMode === "p2p") {
+    return side === "player" ? "Host" : "Guest";
+  }
+  return capitalize(side);
+}
+
+function isLocalTurn() {
+  return state.turn === state.localSide;
+}
+
+function isAiControlledTurn() {
+  return state.gameMode === "ai" && state.turn === "ai";
+}
+
+function canLocalRoll() {
+  if (!state.awaitingRoll) return false;
+  if (state.openingRollPending) return state.localSide === "player";
+  return isLocalTurn();
+}
 
 function initBoard() {
   state.board = Array(POINTS).fill(0);
@@ -58,8 +122,14 @@ function initBoard() {
   state.awaitingRoll = true;
   state.aiMoveHighlights = { from: [], to: [] };
   state.lastMoveSnapshot = null;
-  state.message = "Click the dice to roll.";
+  state.legalPointTargets = [];
+  state.canBearOffSelection = false;
+  state.allowedSelectionDice = [];
+  state.openingRollPending = true;
+  state.diceOwners = [];
+  state.message = "Opening roll: click the dice to decide who starts.";
   render();
+  syncGameStateToPeer();
 }
 
 function rollDie() {
@@ -72,34 +142,117 @@ function rollDie() {
 }
 
 function rollForTurn() {
+  if (state.openingRollPending) {
+    handleOpeningRoll();
+    return;
+  }
+
   state.awaitingRoll = false;
   const die1 = rollDie();
   const die2 = rollDie();
   state.dice = die1 === die2 ? [die1, die1, die1, die1] : [die1, die2];
   state.remainingDice = [...state.dice];
-  state.message = `${capitalize(state.turn)} rolled ${state.dice.join(", ")}.`;
+  state.diceOwners = state.dice.map(() => state.turn);
+  state.message = `${capitalizeSide(state.turn)} rolled ${state.dice.join(", ")}.`;
   render();
 
-  if (
-    state.turn === "player" &&
-    !hasAnyLegalMoves(state, "player", state.remainingDice)
-  ) {
-    state.message = `Player rolled ${state.dice.join(
+  if (!hasAnyLegalMoves(state, state.turn, state.remainingDice)) {
+    state.message = `${capitalizeSide(state.turn)} rolled ${state.dice.join(
       ", ",
-    )} but has no moves. Roll again.`;
+    )} but has no legal moves. Turn passes.`;
     state.dice = [];
+    state.diceOwners = [];
     state.remainingDice = [];
+    state.turn = otherSide(state.turn);
     state.awaitingRoll = true;
     render();
+    syncGameStateToPeer();
+    if (isAiControlledTurn()) {
+      setTimeout(rollForTurn, 500);
+    }
     return;
   }
 
-  if (state.turn === "ai") {
+  syncGameStateToPeer();
+  if (isAiControlledTurn()) {
     setTimeout(runAiTurn, 500);
   }
 }
 
+function handleOpeningRoll() {
+  state.awaitingRoll = false;
+  const playerDie = rollDie();
+  const aiDie = rollDie();
+  state.dice = [playerDie, aiDie];
+  state.diceOwners = ["player", "ai"];
+
+  if (playerDie === aiDie) {
+    state.remainingDice = [];
+    state.message = `Opening roll tied at ${playerDie}. Roll again.`;
+    state.awaitingRoll = true;
+    render();
+    syncGameStateToPeer();
+    return;
+  }
+
+  const winner = playerDie > aiDie ? "player" : "ai";
+  state.openingRollPending = false;
+  state.turn = winner;
+  state.remainingDice = [...state.dice];
+  state.message = `Opening roll: Player ${playerDie}, AI ${aiDie}. ${capitalizeSide(winner)} starts.`;
+  render();
+  syncGameStateToPeer();
+
+  if (!hasAnyLegalMoves(state, winner, state.remainingDice)) {
+    state.message += ` No legal opening moves. Turn passes to ${capitalizeSide(otherSide(winner))}.`;
+    state.dice = [];
+    state.diceOwners = [];
+    state.remainingDice = [];
+    state.turn = otherSide(winner);
+    render();
+    syncGameStateToPeer();
+    setTimeout(rollForTurn, 500);
+    return;
+  }
+
+  if (isAiControlledTurn()) {
+    setTimeout(runAiTurn, 500);
+  }
+}
+
+function updateSelectionHints() {
+  state.legalPointTargets = [];
+  state.canBearOffSelection = false;
+  state.allowedSelectionDice = [];
+
+  if (
+    !isLocalTurn() ||
+    state.awaitingRoll ||
+    !state.selectedFrom ||
+    state.remainingDice.length === 0
+  ) {
+    return;
+  }
+
+  const selectionMoves = getSelectionMoves(
+    state,
+    state.localSide,
+    state.selectedFrom,
+    state.remainingDice,
+  );
+  state.legalPointTargets = [
+    ...new Set(
+      selectionMoves
+        .filter((move) => typeof move.to === "number")
+        .map((move) => move.to),
+    ),
+  ];
+  state.canBearOffSelection = selectionMoves.some((move) => move.to === "off");
+  state.allowedSelectionDice = [...new Set(selectionMoves.map((move) => move.die))];
+}
+
 function render() {
+  updateSelectionHints();
   elements.topRow.innerHTML = "";
   elements.bottomRow.innerHTML = "";
 
@@ -110,19 +263,68 @@ function render() {
   renderRow(elements.bottomRow, bottomPoints, "bottom");
 
   renderDice();
-  elements.turnLabel.textContent = capitalize(state.turn);
+  elements.turnLabel.textContent = state.openingRollPending
+    ? "Opening Roll"
+    : capitalizeSide(state.turn);
+  if (elements.subtitle) {
+    elements.subtitle.textContent =
+      state.gameMode === "p2p" ? "Online peer-to-peer match" : "Single-player vs. the computer";
+  }
+  if (elements.playerTitle) {
+    elements.playerTitle.textContent = state.gameMode === "p2p" ? "Player (Host)" : "Player";
+  }
+  if (elements.opponentTitle) {
+    elements.opponentTitle.textContent = state.gameMode === "p2p" ? "Player (Guest)" : "Computer";
+  }
   elements.playerOff.textContent = state.off.player;
   elements.aiOff.textContent = state.off.ai;
+  if (elements.playerBar) {
+    elements.playerBar.textContent = state.bar.player;
+  }
+  if (elements.aiBar) {
+    elements.aiBar.textContent = state.bar.ai;
+  }
+  if (elements.playerPip) {
+    elements.playerPip.textContent = calculatePipCount(state, "player");
+  }
+  if (elements.aiPip) {
+    elements.aiPip.textContent = calculatePipCount(state, "ai");
+  }
+  if (elements.remainingDice) {
+    if (state.openingRollPending) {
+      elements.remainingDice.textContent = "opening";
+    } else {
+      elements.remainingDice.textContent = `${state.remainingDice.length} left`;
+    }
+  }
+  if (elements.playerOffFill) {
+    elements.playerOffFill.style.width = `${(state.off.player / TOTAL_CHECKERS) * 100}%`;
+  }
+  if (elements.aiOffFill) {
+    elements.aiOffFill.style.width = `${(state.off.ai / TOTAL_CHECKERS) * 100}%`;
+  }
   elements.hint.textContent = state.message;
   if (elements.commitVersion) {
     elements.commitVersion.textContent = `v${COMMIT_VERSION}`;
   }
   elements.dice.classList.toggle(
     "awaiting",
-    state.turn === "player" && state.awaitingRoll,
+    canLocalRoll(),
   );
+  elements.board.classList.toggle("player-turn", state.turn === "player");
+  elements.board.classList.toggle("ai-turn", state.turn === "ai");
   elements.undoMove.disabled =
-    state.turn !== "player" || state.awaitingRoll || !state.lastMoveSnapshot;
+    !isLocalTurn() || state.awaitingRoll || !state.lastMoveSnapshot;
+  elements.endTurn.disabled = !isLocalTurn() || state.awaitingRoll;
+  elements.bearOff.disabled =
+    !isLocalTurn() || state.awaitingRoll || !state.canBearOffSelection;
+  if (elements.gameMode) {
+    elements.gameMode.value = state.gameMode;
+  }
+  if (elements.networkPanel) {
+    elements.networkPanel.hidden = state.gameMode !== "p2p";
+  }
+  updateNetworkStatus();
 
   saveStateToStorage();
 }
@@ -142,11 +344,18 @@ function buildPointOrder(row) {
 }
 
 function renderRow(container, points, row) {
-  points.forEach((point, index) => {
+  points.forEach((point) => {
     if (point === "bar") {
       const bar = document.createElement("div");
       bar.className = "bar";
       bar.dataset.bar = row === "top" ? "ai" : "player";
+      if (
+        state.selectedFrom &&
+        state.selectedFrom.type === "bar" &&
+        bar.dataset.bar === state.localSide
+      ) {
+        bar.classList.add("selected");
+      }
 
       const label = document.createElement("div");
       label.textContent = row === "top" ? "AI BAR" : "PLAYER BAR";
@@ -194,6 +403,9 @@ function renderRow(container, points, row) {
     if (state.aiMoveHighlights.to.includes(point)) {
       pointDiv.classList.add("ai-move-to");
     }
+    if (state.legalPointTargets.includes(point)) {
+      pointDiv.classList.add("legal-target");
+    }
 
     const numberLabel = document.createElement("div");
     numberLabel.className = "point-number";
@@ -227,11 +439,15 @@ function renderRow(container, points, row) {
 
 function renderDice() {
   elements.dice.innerHTML = "";
-  if (state.turn === "player" && state.awaitingRoll) {
+  if (canLocalRoll()) {
     const placeholder = document.createElement("div");
     placeholder.className = "die placeholder";
-    placeholder.textContent = "Roll";
+    placeholder.textContent = state.openingRollPending ? "Opening Roll" : "Roll";
     elements.dice.appendChild(placeholder);
+    elements.dice.setAttribute(
+      "aria-label",
+      state.openingRollPending ? "Roll opening dice" : "Roll dice",
+    );
     return;
   }
   const remainingCounts = state.remainingDice.reduce((acc, die) => {
@@ -239,31 +455,71 @@ function renderDice() {
     return acc;
   }, {});
 
-  state.dice.forEach((die) => {
+  state.dice.forEach((die, index) => {
     const dieEl = document.createElement("div");
     dieEl.className = "die";
+    const owner = state.diceOwners[index] || state.turn;
     if (!remainingCounts[die]) {
       dieEl.classList.add("used");
     } else {
       remainingCounts[die] -= 1;
     }
-    dieEl.textContent = die;
+    if (
+      state.selectedFrom &&
+      isLocalTurn() &&
+      !state.awaitingRoll &&
+      state.allowedSelectionDice.length > 0 &&
+      !state.allowedSelectionDice.includes(die)
+    ) {
+      dieEl.classList.add("unavailable");
+    }
+    if (owner === "player") dieEl.classList.add("player-die");
+    if (owner === "ai") dieEl.classList.add("ai-die");
+    dieEl.setAttribute("aria-label", `${capitalize(owner)} die ${die}`);
+    dieEl.appendChild(createDieFace(die));
     elements.dice.appendChild(dieEl);
   });
+  elements.dice.setAttribute("aria-label", `Dice: ${state.dice.join(", ")}`);
+}
+
+function createDieFace(value) {
+  const face = document.createElement("div");
+  face.className = "die-face";
+  const activePips = {
+    1: [5],
+    2: [1, 9],
+    3: [1, 5, 9],
+    4: [1, 3, 7, 9],
+    5: [1, 3, 5, 7, 9],
+    6: [1, 3, 4, 6, 7, 9],
+  };
+  const pattern = activePips[value] || [];
+  for (let i = 1; i <= 9; i += 1) {
+    const pip = document.createElement("span");
+    pip.className = "pip";
+    if (pattern.includes(i)) {
+      pip.classList.add("active");
+    }
+    face.appendChild(pip);
+  }
+  return face;
 }
 
 function handleBoardClick(event) {
-  if (state.turn !== "player") return;
+  if (!isLocalTurn()) return;
   if (state.awaitingRoll) {
-    state.message = "Roll the dice to start your turn.";
+    state.message = state.openingRollPending
+      ? "Roll opening dice to decide who starts."
+      : "Roll the dice to start your turn.";
     render();
     return;
   }
   const pointEl = event.target.closest(".point");
   const barEl = event.target.closest(".bar");
+  const localSide = state.localSide;
 
-  if (barEl && barEl.dataset.bar === "player") {
-    if (state.bar.player > 0) {
+  if (barEl && barEl.dataset.bar === localSide) {
+    if (state.bar[localSide] > 0) {
       if (state.selectedFrom && state.selectedFrom.type === "bar") {
         state.selectedFrom = null;
         state.message = "Selection cleared.";
@@ -286,23 +542,38 @@ function handleBoardClick(event) {
       render();
       return;
     }
-    const move = findLegalMove("player", state.selectedFrom, { type: "point", index });
+    const move = findLegalMove(localSide, state.selectedFrom, { type: "point", index });
     if (move) {
       state.lastMoveSnapshot = createSnapshot(state);
-      applyMove(state, "player", move);
+      applyMove(state, localSide, move);
       consumeDie(move.die);
       state.selectedFrom = null;
       state.message = "Move made.";
-      if (checkWin("player")) return;
+      if (checkWin(localSide)) return;
       if (state.remainingDice.length === 0) endTurn();
+      render();
+      syncGameStateToPeer();
+    } else {
+      state.message = "That destination is not legal with your remaining dice.";
       render();
     }
     return;
   }
 
-  if (state.board[index] > 0) {
+  if (state.bar[localSide] > 0) {
+    state.message = "You must enter checkers from the bar first.";
+    render();
+    return;
+  }
+
+  const pointCount = state.board[index];
+  const ownsPoint = (localSide === "player" && pointCount > 0) || (localSide === "ai" && pointCount < 0);
+  if (ownsPoint) {
     state.selectedFrom = { type: "point", index };
     state.message = "Selected checker.";
+    render();
+  } else {
+    state.message = "Select one of your checkers.";
     render();
   }
 }
@@ -313,7 +584,8 @@ function consumeDie(die) {
 }
 
 function handleBearOff() {
-  if (state.turn !== "player") return;
+  if (!isLocalTurn()) return;
+  const localSide = state.localSide;
   if (state.awaitingRoll) {
     state.message = "Roll the dice before bearing off.";
     render();
@@ -325,7 +597,7 @@ function handleBearOff() {
     return;
   }
 
-  const move = findLegalMove("player", state.selectedFrom, { type: "off" });
+  const move = findLegalMove(localSide, state.selectedFrom, { type: "off" });
   if (!move) {
     state.message = "No legal bear off with remaining dice.";
     render();
@@ -333,17 +605,18 @@ function handleBearOff() {
   }
 
   state.lastMoveSnapshot = createSnapshot(state);
-  applyMove(state, "player", move);
+  applyMove(state, localSide, move);
   consumeDie(move.die);
   state.selectedFrom = null;
   state.message = "Checker borne off.";
-  if (checkWin("player")) return;
+  if (checkWin(localSide)) return;
   if (state.remainingDice.length === 0) endTurn();
   render();
+  syncGameStateToPeer();
 }
 
 function endTurn() {
-  if (state.turn !== "player") return;
+  if (!isLocalTurn()) return;
   if (state.awaitingRoll) {
     state.message = "Roll the dice before ending your turn.";
     render();
@@ -356,12 +629,21 @@ function endTurn() {
   }
   state.selectedFrom = null;
   state.lastMoveSnapshot = null;
-  state.turn = "ai";
-  rollForTurn();
+  state.turn = otherSide(state.turn);
+  state.dice = [];
+  state.remainingDice = [];
+  state.diceOwners = [];
+  state.awaitingRoll = true;
+  state.message = `${capitalizeSide(state.turn)} to roll.`;
+  render();
+  syncGameStateToPeer();
+  if (isAiControlledTurn()) {
+    setTimeout(rollForTurn, 500);
+  }
 }
 
 function runAiTurn() {
-  if (state.turn !== "ai") return;
+  if (state.gameMode !== "ai" || state.turn !== "ai") return;
   const sequences = generateMoveSequences(state, "ai", state.remainingDice);
   if (sequences.length === 0) {
     state.message = `AI rolled ${state.dice.join(", ")} but has no moves.`;
@@ -572,6 +854,13 @@ function getAllowedFirstMoves(currentState, player, dice) {
   return sequences.map((seq) => seq.moves[0]).filter(Boolean);
 }
 
+function getSelectionMoves(currentState, player, from, dice) {
+  return getAllowedFirstMoves(currentState, player, dice).filter((move) => {
+    if (from.type === "bar") return move.from === "bar";
+    return move.from === from.index;
+  });
+}
+
 function calculatePipCount(currentState, player) {
   let total = 0;
   for (let i = 0; i < POINTS; i += 1) {
@@ -687,8 +976,9 @@ function evaluateState(currentState) {
 
 function checkWin(player) {
   if (state.off[player] >= TOTAL_CHECKERS) {
-    state.message = `${capitalize(player)} wins! Start a new game to play again.`;
+    state.message = `${capitalizeSide(player)} wins! Start a new game to play again.`;
     render();
+    syncGameStateToPeer();
     return true;
   }
   return false;
@@ -706,13 +996,16 @@ function formatMove(move) {
 
 function startPlayerTurn() {
   state.turn = "player";
+  state.openingRollPending = false;
   state.selectedFrom = null;
   state.dice = [];
   state.remainingDice = [];
+  state.diceOwners = [];
   state.awaitingRoll = true;
   state.lastMoveSnapshot = null;
-  state.message += " Your turn—click the dice to roll.";
+  state.message += ` ${capitalizeSide("player")} to roll.`;
   render();
+  syncGameStateToPeer();
 }
 
 function cloneState(currentState) {
@@ -734,6 +1027,7 @@ function createSnapshot(currentState) {
     off: { ...currentState.off },
     dice: [...currentState.dice],
     remainingDice: [...currentState.remainingDice],
+    diceOwners: [...currentState.diceOwners],
     awaitingRoll: currentState.awaitingRoll,
   };
 }
@@ -744,6 +1038,9 @@ function restoreSnapshot(snapshot) {
   state.off = { ...snapshot.off };
   state.dice = [...snapshot.dice];
   state.remainingDice = [...snapshot.remainingDice];
+  state.diceOwners = Array.isArray(snapshot.diceOwners)
+    ? [...snapshot.diceOwners]
+    : state.dice.map(() => state.turn);
   state.awaitingRoll = snapshot.awaitingRoll;
   state.selectedFrom = null;
   state.aiMoveHighlights = { from: [], to: [] };
@@ -786,9 +1083,13 @@ function saveStateToStorage() {
     bar: state.bar,
     off: state.off,
     turn: state.turn,
+    gameMode: state.gameMode,
+    localSide: state.localSide,
     dice: state.dice,
+    diceOwners: state.diceOwners,
     remainingDice: state.remainingDice,
     awaitingRoll: state.awaitingRoll,
+    openingRollPending: state.openingRollPending,
   };
   localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
 }
@@ -805,34 +1106,492 @@ function loadStateFromStorage() {
   state.bar = payload.bar;
   state.off = payload.off;
   state.turn = payload.turn;
+  state.gameMode = payload.gameMode === "p2p" ? "p2p" : "ai";
+  state.localSide = payload.localSide === "ai" ? "ai" : "player";
   state.dice = payload.dice;
+  state.diceOwners = Array.isArray(payload.diceOwners)
+    ? payload.diceOwners
+    : payload.dice.map(() => payload.turn || "player");
   state.remainingDice = payload.remainingDice;
   state.awaitingRoll =
-    payload.awaitingRoll ?? (state.turn === "player" && state.remainingDice.length === 0);
+    payload.awaitingRoll ?? (state.remainingDice.length === 0);
+  state.openingRollPending = payload.openingRollPending === true;
   state.selectedFrom = null;
   state.message = "Loaded saved game.";
   state.lastMoveSnapshot = null;
   render();
+  syncGameStateToPeer();
+}
+
+function updateNetworkStatus(forcedMessage) {
+  if (!elements.networkStatus) return;
+  if (state.gameMode !== "p2p") {
+    elements.networkStatus.textContent = "Not connected.";
+    return;
+  }
+  if (forcedMessage) {
+    elements.networkStatus.textContent = forcedMessage;
+    return;
+  }
+  if (rtc.connected) {
+    elements.networkStatus.textContent = `Connected (${rtc.role || "peer"}).`;
+    return;
+  }
+  if (rtc.role === "host" && rtc.pc) {
+    elements.networkStatus.textContent = "Host session created. Waiting for answer.";
+    return;
+  }
+  if (rtc.role === "guest" && rtc.pc) {
+    elements.networkStatus.textContent = "Answer created. Waiting for host to connect.";
+    return;
+  }
+  elements.networkStatus.textContent = "No active session.";
+}
+
+function toBase64Url(value) {
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function fromBase64Url(value) {
+  let normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  while (normalized.length % 4 !== 0) {
+    normalized += "=";
+  }
+  const binary = atob(normalized);
+  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
+function encodeSignalDescriptor(descriptor) {
+  return toBase64Url(JSON.stringify(descriptor));
+}
+
+function decodeSignalDescriptor(encoded) {
+  const parsed = JSON.parse(fromBase64Url(encoded));
+  if (!parsed || typeof parsed.type !== "string" || typeof parsed.sdp !== "string") {
+    throw new Error("Invalid signal payload.");
+  }
+  return parsed;
+}
+
+function buildSignalUrl(type, descriptor) {
+  const url = new URL(window.location.href);
+  url.search = "";
+  url.hash = "";
+  url.searchParams.set(type, encodeSignalDescriptor(descriptor));
+  return url.toString();
+}
+
+function parseSignalInput(rawValue) {
+  const value = rawValue.trim();
+  if (!value) return null;
+
+  const parseParams = (params) => {
+    const offer = params.get("offer");
+    const answer = params.get("answer");
+    if (offer) {
+      return { kind: "offer", descriptor: decodeSignalDescriptor(offer) };
+    }
+    if (answer) {
+      return { kind: "answer", descriptor: decodeSignalDescriptor(answer) };
+    }
+    return null;
+  };
+
+  try {
+    if (value.includes("://")) {
+      const params = new URL(value).searchParams;
+      const parsed = parseParams(params);
+      if (parsed) return parsed;
+    }
+  } catch (error) {
+    // fall through to alternate parsing
+  }
+
+  if (value.startsWith("?")) {
+    const parsed = parseParams(new URLSearchParams(value.slice(1)));
+    if (parsed) return parsed;
+  }
+
+  if (value.startsWith("offer=") || value.startsWith("answer=") || value.includes("&")) {
+    const parsed = parseParams(new URLSearchParams(value));
+    if (parsed) return parsed;
+  }
+
+  try {
+    const descriptor = JSON.parse(value);
+    if (descriptor?.type && descriptor?.sdp) {
+      return { kind: descriptor.type === "offer" ? "offer" : "answer", descriptor };
+    }
+  } catch (error) {
+    // ignore and continue
+  }
+
+  throw new Error("Could not parse signal code. Use a URL with ?offer=... or ?answer=...");
+}
+
+function waitForIceGatheringComplete(pc, timeoutMs = 12000) {
+  if (pc.iceGatheringState === "complete") {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      pc.removeEventListener("icegatheringstatechange", onStateChange);
+      clearTimeout(timeout);
+      resolve();
+    };
+    const onStateChange = () => {
+      if (pc.iceGatheringState === "complete") finish();
+    };
+    const timeout = setTimeout(finish, timeoutMs);
+    pc.addEventListener("icegatheringstatechange", onStateChange);
+  });
+}
+
+function clearPeerSession() {
+  if (rtc.channel) {
+    rtc.channel.onopen = null;
+    rtc.channel.onclose = null;
+    rtc.channel.onmessage = null;
+    rtc.channel.onerror = null;
+    if (rtc.channel.readyState !== "closed") {
+      rtc.channel.close();
+    }
+  }
+  if (rtc.pc) {
+    rtc.pc.onconnectionstatechange = null;
+    rtc.pc.ondatachannel = null;
+    rtc.pc.close();
+  }
+  rtc.pc = null;
+  rtc.channel = null;
+  rtc.role = null;
+  rtc.connected = false;
+  rtc.generatedSignal = "";
+}
+
+function applyRemoteGameState(payload) {
+  if (!payload) return;
+  state.remoteSyncInProgress = true;
+  state.board = [...payload.board];
+  state.bar = { ...payload.bar };
+  state.off = { ...payload.off };
+  state.turn = payload.turn;
+  state.dice = [...payload.dice];
+  state.diceOwners = [...payload.diceOwners];
+  state.remainingDice = [...payload.remainingDice];
+  state.awaitingRoll = payload.awaitingRoll;
+  state.openingRollPending = payload.openingRollPending === true;
+  state.message = payload.message || state.message;
+  state.selectedFrom = null;
+  state.lastMoveSnapshot = null;
+  state.aiMoveHighlights = { from: [], to: [] };
+  state.lastSyncedPayload = JSON.stringify(payload);
+  render();
+  state.remoteSyncInProgress = false;
+}
+
+function buildSyncPayload() {
+  return {
+    board: [...state.board],
+    bar: { ...state.bar },
+    off: { ...state.off },
+    turn: state.turn,
+    dice: [...state.dice],
+    diceOwners: [...state.diceOwners],
+    remainingDice: [...state.remainingDice],
+    awaitingRoll: state.awaitingRoll,
+    openingRollPending: state.openingRollPending,
+    message: state.message,
+  };
+}
+
+function syncGameStateToPeer(force = false) {
+  if (state.gameMode !== "p2p") return;
+  if (state.remoteSyncInProgress) return;
+  if (!rtc.connected || !rtc.channel || rtc.channel.readyState !== "open") return;
+
+  const payload = buildSyncPayload();
+  const encoded = JSON.stringify(payload);
+  if (!force && encoded === state.lastSyncedPayload) return;
+  state.lastSyncedPayload = encoded;
+  rtc.channel.send(JSON.stringify({ type: "state-sync", payload }));
+}
+
+function attachDataChannel(channel) {
+  rtc.channel = channel;
+  rtc.channel.onopen = () => {
+    rtc.connected = true;
+    state.message = "Peer connected.";
+    updateNetworkStatus("Peer connected.");
+    render();
+    if (rtc.role === "host") {
+      syncGameStateToPeer(true);
+    }
+  };
+  rtc.channel.onclose = () => {
+    rtc.connected = false;
+    updateNetworkStatus("Peer disconnected.");
+    render();
+  };
+  rtc.channel.onerror = () => {
+    updateNetworkStatus("Data channel error.");
+    render();
+  };
+  rtc.channel.onmessage = (event) => {
+    try {
+      const message = JSON.parse(event.data);
+      if (message.type === "state-sync") {
+        applyRemoteGameState(message.payload);
+      }
+    } catch (error) {
+      state.message = "Received invalid peer message.";
+      render();
+    }
+  };
+}
+
+function createPeerConnection(role) {
+  clearPeerSession();
+  rtc.role = role;
+  rtc.pc = new RTCPeerConnection(RTC_CONFIG);
+  rtc.pc.onconnectionstatechange = () => {
+    if (!rtc.pc) return;
+    if (rtc.pc.connectionState === "connected") {
+      rtc.connected = true;
+    }
+    if (rtc.pc.connectionState === "failed" || rtc.pc.connectionState === "closed") {
+      rtc.connected = false;
+    }
+    updateNetworkStatus();
+    render();
+  };
+  rtc.pc.ondatachannel = (event) => {
+    attachDataChannel(event.channel);
+  };
+  return rtc.pc;
+}
+
+async function createOfferSignal() {
+  state.gameMode = "p2p";
+  state.localSide = "player";
+  const pc = createPeerConnection("host");
+  const channel = pc.createDataChannel("bg-state");
+  attachDataChannel(channel);
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  await waitForIceGatheringComplete(pc);
+
+  const url = buildSignalUrl("offer", pc.localDescription);
+  rtc.generatedSignal = url;
+  if (elements.signalOutput) {
+    elements.signalOutput.value = url;
+  }
+  state.message = "Offer created. Share this URL with your opponent.";
+  updateNetworkStatus("Offer created. Waiting for answer.");
+  render();
+}
+
+async function acceptOfferSignal(descriptor) {
+  state.gameMode = "p2p";
+  state.localSide = "ai";
+  const pc = createPeerConnection("guest");
+  await pc.setRemoteDescription(descriptor);
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  await waitForIceGatheringComplete(pc);
+
+  const url = buildSignalUrl("answer", pc.localDescription);
+  rtc.generatedSignal = url;
+  if (elements.signalOutput) {
+    elements.signalOutput.value = url;
+  }
+  state.message = "Offer accepted. Send the answer URL back to the host.";
+  updateNetworkStatus("Answer created. Waiting for host.");
+  render();
+}
+
+async function acceptAnswerSignal(descriptor) {
+  if (!rtc.pc || rtc.role !== "host") {
+    throw new Error("Create an offer first, then apply the answer.");
+  }
+  await rtc.pc.setRemoteDescription(descriptor);
+  state.message = "Answer applied. Waiting for peer connection.";
+  updateNetworkStatus("Answer applied. Connecting...");
+  render();
+}
+
+function disconnectPeerSession() {
+  clearPeerSession();
+  if (elements.signalOutput) {
+    elements.signalOutput.value = "";
+  }
+  updateNetworkStatus("Disconnected.");
+  render();
+}
+
+async function handleApplySignal() {
+  try {
+    const parsed = parseSignalInput(elements.signalInput?.value || "");
+    if (!parsed) return;
+    if (parsed.kind === "offer") {
+      await acceptOfferSignal(parsed.descriptor);
+    } else {
+      await acceptAnswerSignal(parsed.descriptor);
+    }
+  } catch (error) {
+    state.message = error.message || "Failed to apply signal.";
+    render();
+  }
+}
+
+function switchGameMode(mode) {
+  if (mode === state.gameMode) {
+    render();
+    return;
+  }
+  if (mode === "p2p") {
+    state.gameMode = "p2p";
+    state.localSide = "player";
+    state.message = "Online PvP mode enabled. Create an invite or paste one to join.";
+    render();
+    return;
+  }
+  disconnectPeerSession();
+  state.gameMode = "ai";
+  state.localSide = "player";
+  initBoard();
+}
+
+function prefillSignalFromQuery() {
+  const params = new URLSearchParams(window.location.search);
+  const offer = params.get("offer");
+  const answer = params.get("answer");
+  if (!offer && !answer) return;
+
+  state.gameMode = "p2p";
+  if (elements.gameMode) {
+    elements.gameMode.value = "p2p";
+  }
+  if (elements.signalInput) {
+    elements.signalInput.value = window.location.search;
+  }
+  state.message = offer
+    ? "Invite code detected. Click Apply Code to join as guest."
+    : "Answer code detected. Host: click Apply Code.";
+}
+
+function handleKeyboardShortcut(event) {
+  if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
+  const target = event.target;
+  const isEditable =
+    target instanceof HTMLElement &&
+    (target.isContentEditable ||
+      target.tagName === "INPUT" ||
+      target.tagName === "TEXTAREA" ||
+      target.tagName === "SELECT");
+  if (isEditable) return;
+
+  const key = event.key.toLowerCase();
+  if (key === "enter") {
+    if (canLocalRoll()) {
+      event.preventDefault();
+      rollForTurn();
+    }
+    return;
+  }
+  if (key === "r") {
+    if (canLocalRoll()) {
+      event.preventDefault();
+      rollForTurn();
+    }
+    return;
+  }
+  if (key === "n") {
+    event.preventDefault();
+    if (state.gameMode === "p2p" && state.localSide !== "player") {
+      state.message = "Only host can start a new network game.";
+      render();
+      return;
+    }
+    initBoard();
+    return;
+  }
+  if (key === "e") {
+    event.preventDefault();
+    state.message = "Turn ended.";
+    endTurn();
+    return;
+  }
+  if (key === "u") {
+    event.preventDefault();
+    if (!elements.undoMove.disabled) {
+      restoreSnapshot(state.lastMoveSnapshot);
+      state.lastMoveSnapshot = null;
+      state.message = "Last move undone.";
+      render();
+    }
+    return;
+  }
+  if (key === "b") {
+    event.preventDefault();
+    handleBearOff();
+    return;
+  }
+  if (key === "s") {
+    event.preventDefault();
+    saveStateToStorage();
+    state.message = "Game saved.";
+    render();
+    return;
+  }
+  if (key === "l") {
+    event.preventDefault();
+    loadStateFromStorage();
+  }
 }
 
 function setupListeners() {
   elements.board.addEventListener("click", handleBoardClick);
   elements.dice.addEventListener("click", () => {
-    if (state.turn !== "player" || !state.awaitingRoll) return;
+    if (!canLocalRoll()) return;
     rollForTurn();
   });
-  elements.newGame.addEventListener("click", initBoard);
+  elements.dice.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    if (!canLocalRoll()) return;
+    event.preventDefault();
+    rollForTurn();
+  });
+  elements.newGame.addEventListener("click", () => {
+    if (state.gameMode === "p2p" && state.localSide !== "player") {
+      state.message = "Only host can start a new network game.";
+      render();
+      return;
+    }
+    initBoard();
+  });
   elements.bearOff.addEventListener("click", handleBearOff);
   elements.endTurn.addEventListener("click", () => {
     state.message = "Turn ended.";
     endTurn();
   });
   elements.undoMove.addEventListener("click", () => {
-    if (!state.lastMoveSnapshot || state.turn !== "player") return;
+    if (!state.lastMoveSnapshot || !isLocalTurn()) return;
     restoreSnapshot(state.lastMoveSnapshot);
     state.lastMoveSnapshot = null;
     state.message = "Last move undone.";
     render();
+    syncGameStateToPeer();
   });
   elements.save.addEventListener("click", () => {
     saveStateToStorage();
@@ -840,7 +1599,38 @@ function setupListeners() {
     render();
   });
   elements.load.addEventListener("click", loadStateFromStorage);
+  elements.gameMode.addEventListener("change", (event) => {
+    switchGameMode(event.target.value);
+  });
+  elements.hostOffer.addEventListener("click", async () => {
+    try {
+      await createOfferSignal();
+    } catch (error) {
+      state.message = error.message || "Failed to create offer.";
+      render();
+    }
+  });
+  elements.applySignal.addEventListener("click", handleApplySignal);
+  elements.disconnectPeer.addEventListener("click", disconnectPeerSession);
+  elements.copySignal.addEventListener("click", async () => {
+    const code = elements.signalOutput.value.trim();
+    if (!code) {
+      state.message = "No generated code to copy.";
+      render();
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(code);
+      state.message = "Generated code copied.";
+    } catch (error) {
+      state.message = "Clipboard copy failed. Copy manually.";
+    }
+    render();
+  });
+  document.addEventListener("keydown", handleKeyboardShortcut);
 }
 
 setupListeners();
 initBoard();
+prefillSignalFromQuery();
+render();

@@ -7,6 +7,14 @@ Backgammon single-player web app.
 - Use **Bear Off** to remove a selected checker once all of your pieces are in the home board.
 - Use **Save**/**Load** to persist the current game state in local storage.
 
+## Online PvP (WebRTC, no server)
+- Switch mode to **Online PvP (WebRTC)**.
+- Host clicks **Create Invite** and sends the generated URL (`?offer=...`) to the guest.
+- Guest pastes/opens that URL and clicks **Apply Code** to generate an answer URL (`?answer=...`).
+- Guest sends the answer URL back to host.
+- Host pastes the answer URL and clicks **Apply Code**.
+- After connection, game state sync runs directly peer-to-peer over a WebRTC DataChannel.
+
 ## Bear off mode
 - You can bear off only after all of your remaining checkers are in the home board (points 1-6 for the player). Checkers already borne off still count toward the total, so you can keep bearing off after the first one leaves the board.
 - Select a checker on a home board point, then click **Bear Off**. The move will consume one die, just like a normal move.
