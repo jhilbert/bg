@@ -7,6 +7,18 @@ Backgammon single-player web app.
 - Use **Bear Off** to remove a selected checker once all of your pieces are in the home board.
 - Use **Save**/**Load** to persist the current game state in local storage.
 
+## Versioning
+- Version format: `VYYYY-MM-DD-N` (example: `V2026-02-08-1`).
+- The same value is written to:
+  - `index.html` CSS URL query (`style.css?v=...`)
+  - `index.html` JS URL query (`script.js?v=...`)
+  - `script.js` `COMMIT_VERSION` (shown top-right in UI)
+- Auto-bump on every commit is enabled via Git hook path:
+  - `core.hooksPath=.githooks`
+- Manual bump (optional):
+  - `./scripts/bump-version.sh`
+  - or set explicitly: `./scripts/bump-version.sh V2026-02-08-3`
+
 ## Online PvP (WebRTC + Cloudflare Durable Objects signaling)
 The app now uses a tiny rendezvous service for signaling (offer/answer + trickle ICE), fixed to:
 - `https://bg-rendezvous.hilbert.workers.dev`

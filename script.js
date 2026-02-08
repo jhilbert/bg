@@ -3,7 +3,7 @@ const TOTAL_CHECKERS = 15;
 const STORAGE_KEY = "bg-save";
 const AI_MOVE_TOTAL_MS = 3000;
 const AI_MOVE_MIN_STEP_MS = 450;
-const COMMIT_VERSION = "e325be3";
+const COMMIT_VERSION = "V2026-02-08-2";
 const SIGNALING_BASE_URL = "https://bg-rendezvous.hilbert.workers.dev";
 const RTC_CONFIG = {
   iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
@@ -177,22 +177,30 @@ function rollForTurn() {
   state.dice = die1 === die2 ? [die1, die1, die1, die1] : [die1, die2];
   state.remainingDice = [...state.dice];
   state.diceOwners = state.dice.map(() => state.turn);
+  state.lastMoveSnapshot = createSnapshot(state);
   state.message = `${capitalizeSide(state.turn)} rolled ${state.dice.join(", ")}.`;
   render();
 
   if (!hasAnyLegalMoves(state, state.turn, state.remainingDice)) {
+    const noBarEntryForPlayer =
+      state.gameMode === "ai" && state.turn === "player" && state.bar.player > 0;
+    const delayMs = noBarEntryForPlayer ? 5000 : 500;
     state.message = `${capitalizeSide(state.turn)} rolled ${state.dice.join(
       ", ",
     )} but has no legal moves. Turn passes.`;
+    if (noBarEntryForPlayer) {
+      state.message += " Checker on bar cannot enter. Computer will roll in 5 seconds.";
+    }
     state.dice = [];
     state.diceOwners = [];
     state.remainingDice = [];
+    state.lastMoveSnapshot = null;
     state.turn = otherSide(state.turn);
     state.awaitingRoll = true;
     render();
     syncGameStateToPeer();
     if (isAiControlledTurn()) {
-      setTimeout(rollForTurn, 500);
+      setTimeout(rollForTurn, delayMs);
     }
     return;
   }
@@ -223,6 +231,7 @@ function handleOpeningRoll() {
   state.openingRollPending = false;
   state.turn = winner;
   state.remainingDice = [...state.dice];
+  state.lastMoveSnapshot = createSnapshot(state);
   state.message = `Opening roll: ${sideLabel("player")} ${playerDie}, ${sideLabel("ai")} ${aiDie}. ${capitalizeSide(winner)} starts.`;
   render();
   syncGameStateToPeer();
@@ -232,6 +241,7 @@ function handleOpeningRoll() {
     state.dice = [];
     state.diceOwners = [];
     state.remainingDice = [];
+    state.lastMoveSnapshot = null;
     state.turn = otherSide(winner);
     render();
     syncGameStateToPeer();
@@ -357,7 +367,7 @@ function render() {
   }
   elements.hint.textContent = state.message;
   if (elements.commitVersion) {
-    elements.commitVersion.textContent = `v${COMMIT_VERSION}`;
+    elements.commitVersion.textContent = COMMIT_VERSION;
   }
   elements.dice.classList.toggle(
     "awaiting",
@@ -599,7 +609,6 @@ function handleBoardClick(event) {
     }
     const move = findLegalMove(localSide, state.selectedFrom, { type: "point", index });
     if (move) {
-      state.lastMoveSnapshot = createSnapshot(state);
       applyMove(state, localSide, move);
       consumeDie(move.die);
       state.selectedFrom = null;
@@ -659,7 +668,6 @@ function handleBearOff() {
     return;
   }
 
-  state.lastMoveSnapshot = createSnapshot(state);
   applyMove(state, localSide, move);
   consumeDie(move.die);
   state.selectedFrom = null;
@@ -1918,9 +1926,9 @@ function handleKeyboardShortcut(event) {
     event.preventDefault();
     if (!elements.undoMove.disabled) {
       restoreSnapshot(state.lastMoveSnapshot);
-      state.lastMoveSnapshot = null;
-      state.message = "Last move undone.";
+      state.message = "All moves for this dice roll were undone.";
       render();
+      syncGameStateToPeer();
     }
     return;
   }
@@ -1986,8 +1994,7 @@ function setupListeners() {
   elements.undoMove.addEventListener("click", () => {
     if (!state.lastMoveSnapshot || !isLocalTurn()) return;
     restoreSnapshot(state.lastMoveSnapshot);
-    state.lastMoveSnapshot = null;
-    state.message = "Last move undone.";
+    state.message = "All moves for this dice roll were undone.";
     render();
     syncGameStateToPeer();
   });
