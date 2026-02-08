@@ -598,6 +598,8 @@ button kbd {
   height: auto;
   max-height: min(calc(100% - 22px), 840px);
   aspect-ratio: 1.4 / 1;
+  display: flex;
+  align-items: stretch;
 }
 
 .board {
@@ -611,8 +613,9 @@ button kbd {
   position: relative;
   border: 1px solid rgba(255, 255, 255, 0.12);
   min-height: 0;
-  height: 100%;
+  height: auto;
   width: 100%;
+  flex: 1 1 auto;
   grid-template-rows: repeat(2, minmax(0, 1fr));
 }
 
