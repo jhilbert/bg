@@ -830,9 +830,9 @@ button kbd {
 
 .point .checker {
   --checker-fit-height: calc((100% - (var(--stack-gap) * 4)) / 5);
-  height: clamp(20px, var(--checker-fit-height), 64px);
-  width: auto;
-  max-width: calc(100% - 4px);
+  --checker-size: clamp(20px, min(var(--checker-fit-height), calc(100% - 4px)), 64px);
+  width: var(--checker-size);
+  height: var(--checker-size);
   aspect-ratio: 1 / 1;
   flex: 0 0 auto;
 }
