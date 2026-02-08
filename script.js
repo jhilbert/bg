@@ -3,7 +3,7 @@ const TOTAL_CHECKERS = 15;
 const STORAGE_KEY = "bg-save";
 const AI_MOVE_TOTAL_MS = 3000;
 const AI_MOVE_MIN_STEP_MS = 450;
-const COMMIT_VERSION = "V2026-02-08-6";
+const COMMIT_VERSION = "V2026-02-08-8";
 const SIGNALING_BASE_URL = "https://bg-rendezvous.hilbert.workers.dev";
 const RTC_CONFIG = {
   iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
@@ -28,6 +28,10 @@ const state = {
   diceOwners: [],
   gameMode: "ai",
   localSide: "player",
+  autoDiceEnabled: false,
+  showNoMoveDice: false,
+  localPlayerName: "",
+  playerNames: { player: "", ai: "" },
   networkModalOpen: false,
   remoteSyncInProgress: false,
   lastSyncedPayload: "",
@@ -44,6 +48,8 @@ const rtc = {
   pendingRemoteCandidates: [],
   generatedSignal: "",
 };
+
+let autoDiceRollTimer = null;
 
 const elements = {
   topRow: document.getElementById("top-row"),
@@ -71,6 +77,9 @@ const elements = {
   save: document.getElementById("save"),
   load: document.getElementById("load"),
   roomAction: document.getElementById("room-action"),
+  autoDiceToggle: document.getElementById("auto-dice-toggle"),
+  playerNameInput: document.getElementById("player-name-input"),
+  updatePlayerName: document.getElementById("update-player-name"),
   networkStatus: document.getElementById("network-status"),
   copyInvite: document.getElementById("copy-invite"),
   joinLink: document.getElementById("join-link"),
@@ -85,16 +94,60 @@ function otherSide(side) {
   return side === "player" ? "ai" : "player";
 }
 
+function normalizePlayerName(rawValue) {
+  return String(rawValue || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 22);
+}
+
+function sideRoleName(side) {
+  return side === "player" ? "Host" : "Guest";
+}
+
+function getPlayerName(side) {
+  if (side !== "player" && side !== "ai") return "";
+  return normalizePlayerName(state.playerNames[side] || "");
+}
+
+function sideIdentityLabel(side) {
+  const customName = getPlayerName(side);
+  return customName || sideRoleName(side);
+}
+
+function setLocalPlayerName(rawValue, { announce = false, sync = true } = {}) {
+  const normalized = normalizePlayerName(rawValue);
+  const side = state.localSide === "ai" ? "ai" : "player";
+  const changed =
+    state.localPlayerName !== normalized || getPlayerName(side) !== normalized;
+
+  state.localPlayerName = normalized;
+  state.playerNames[side] = normalized;
+
+  if (!changed) return;
+
+  if (announce) {
+    state.message = normalized
+      ? `Player name updated to ${normalized}.`
+      : "Player name cleared. Using Host/Guest labels.";
+  }
+  render();
+  if (sync) {
+    syncGameStateToPeer(true);
+  }
+}
+
 function sideLabel(side) {
   if (state.gameMode === "p2p") {
-    return side === "player" ? "Player (Host)" : "Player (Guest)";
+    return `Player (${sideIdentityLabel(side)})`;
   }
   return side === "player" ? "Player" : "Computer";
 }
 
 function sideBarLabel(side) {
   if (state.gameMode === "p2p") {
-    return side === "player" ? "PLAYER (HOST) BAR" : "PLAYER (GUEST) BAR";
+    const compactName = sideIdentityLabel(side).toUpperCase().slice(0, 14);
+    return `PLAYER (${compactName}) BAR`;
   }
   return side === "player" ? "PLAYER BAR" : "AI BAR";
 }
@@ -125,6 +178,40 @@ function canLocalRoll() {
   return isLocalTurn();
 }
 
+function clearAutoDiceRollTimer() {
+  if (autoDiceRollTimer) {
+    clearTimeout(autoDiceRollTimer);
+    autoDiceRollTimer = null;
+  }
+}
+
+function maybeScheduleAutoDiceRoll() {
+  const shouldAutoRoll = (
+    state.gameMode === "p2p"
+    && state.autoDiceEnabled
+    && !state.networkModalOpen
+    && canLocalRoll()
+  );
+  if (!shouldAutoRoll) {
+    clearAutoDiceRollTimer();
+    return;
+  }
+  if (autoDiceRollTimer) return;
+  const delayMs = state.showNoMoveDice ? 1200 : 320;
+  autoDiceRollTimer = setTimeout(() => {
+    autoDiceRollTimer = null;
+    if (
+      state.gameMode !== "p2p"
+      || !state.autoDiceEnabled
+      || state.networkModalOpen
+      || !canLocalRoll()
+    ) {
+      return;
+    }
+    rollForTurn();
+  }, delayMs);
+}
+
 function initBoard() {
   state.board = Array(POINTS).fill(0);
   state.board[23] = 2;
@@ -151,6 +238,8 @@ function initBoard() {
   state.allowedSelectionDice = [];
   state.openingRollPending = true;
   state.diceOwners = [];
+  state.showNoMoveDice = false;
+  state.playerNames[state.localSide] = state.localPlayerName;
   state.message = "Opening roll: click the dice to decide who starts.";
   render();
   syncGameStateToPeer();
@@ -171,6 +260,7 @@ function rollForTurn() {
     return;
   }
 
+  state.showNoMoveDice = false;
   state.awaitingRoll = false;
   const die1 = rollDie();
   const die2 = rollDie();
@@ -191,9 +281,8 @@ function rollForTurn() {
     if (noBarEntryForPlayer) {
       state.message += " Checker on bar cannot enter. Computer will roll in 5 seconds.";
     }
-    state.dice = [];
-    state.diceOwners = [];
     state.remainingDice = [];
+    state.showNoMoveDice = true;
     state.lastMoveSnapshot = null;
     state.turn = otherSide(state.turn);
     state.awaitingRoll = true;
@@ -212,6 +301,7 @@ function rollForTurn() {
 }
 
 function handleOpeningRoll() {
+  state.showNoMoveDice = false;
   state.awaitingRoll = false;
   const playerDie = rollDie();
   const aiDie = rollDie();
@@ -220,6 +310,7 @@ function handleOpeningRoll() {
 
   if (playerDie === aiDie) {
     state.remainingDice = [];
+    state.showNoMoveDice = false;
     state.message = `Opening roll tied at ${playerDie}. Roll again.`;
     state.awaitingRoll = true;
     render();
@@ -238,9 +329,8 @@ function handleOpeningRoll() {
 
   if (!hasAnyLegalMoves(state, winner, state.remainingDice)) {
     state.message += ` No legal opening moves. Turn passes to ${capitalizeSide(otherSide(winner))}.`;
-    state.dice = [];
-    state.diceOwners = [];
     state.remainingDice = [];
+    state.showNoMoveDice = true;
     state.lastMoveSnapshot = null;
     state.turn = otherSide(winner);
     render();
@@ -413,10 +503,35 @@ function render() {
     elements.roomAction.classList.toggle("leave", inRoom);
     elements.roomAction.setAttribute("aria-expanded", state.networkModalOpen ? "true" : "false");
   }
+  if (elements.autoDiceToggle) {
+    const showToggle = state.gameMode === "p2p";
+    elements.autoDiceToggle.hidden = !showToggle;
+    elements.autoDiceToggle.disabled = !showToggle;
+    elements.autoDiceToggle.classList.toggle("active", state.autoDiceEnabled);
+    elements.autoDiceToggle.textContent = state.autoDiceEnabled
+      ? "Auto dice: on"
+      : "Auto dice: off";
+    elements.autoDiceToggle.setAttribute(
+      "aria-pressed",
+      state.autoDiceEnabled ? "true" : "false",
+    );
+  }
+  if (elements.playerNameInput) {
+    const localRole = sideRoleName(state.localSide);
+    elements.playerNameInput.placeholder = `Your name (${localRole})`;
+    if (document.activeElement !== elements.playerNameInput) {
+      elements.playerNameInput.value = state.localPlayerName;
+    }
+  }
+  if (elements.updatePlayerName && elements.playerNameInput) {
+    const pendingName = normalizePlayerName(elements.playerNameInput.value);
+    elements.updatePlayerName.disabled = pendingName === state.localPlayerName;
+  }
   if (elements.roomModal) {
     elements.roomModal.hidden = !state.networkModalOpen;
   }
   updateNetworkStatus();
+  maybeScheduleAutoDiceRoll();
 
   saveStateToStorage();
 }
@@ -531,7 +646,8 @@ function renderRow(container, points, row) {
 
 function renderDice() {
   elements.dice.innerHTML = "";
-  if (canLocalRoll()) {
+  const showRollPrompt = canLocalRoll() && !state.showNoMoveDice;
+  if (showRollPrompt) {
     const placeholder = document.createElement("div");
     placeholder.className = "die placeholder";
     placeholder.textContent = state.openingRollPending ? "Opening Roll" : "Roll";
@@ -719,6 +835,7 @@ function endTurn() {
   }
   state.selectedFrom = null;
   state.lastMoveSnapshot = null;
+  state.showNoMoveDice = false;
   state.turn = otherSide(state.turn);
   state.dice = [];
   state.remainingDice = [];
@@ -1091,6 +1208,7 @@ function startPlayerTurn() {
   state.dice = [];
   state.remainingDice = [];
   state.diceOwners = [];
+  state.showNoMoveDice = false;
   state.awaitingRoll = true;
   state.lastMoveSnapshot = null;
   state.message += ` ${capitalizeSide("player")} to roll.`;
@@ -1119,6 +1237,7 @@ function createSnapshot(currentState) {
     remainingDice: [...currentState.remainingDice],
     diceOwners: [...currentState.diceOwners],
     awaitingRoll: currentState.awaitingRoll,
+    showNoMoveDice: currentState.showNoMoveDice === true,
   };
 }
 
@@ -1132,6 +1251,7 @@ function restoreSnapshot(snapshot) {
     ? [...snapshot.diceOwners]
     : state.dice.map(() => state.turn);
   state.awaitingRoll = snapshot.awaitingRoll;
+  state.showNoMoveDice = snapshot.showNoMoveDice === true;
   state.selectedFrom = null;
   state.aiMoveHighlights = { from: [], to: [] };
 }
@@ -1180,6 +1300,12 @@ function saveStateToStorage() {
     remainingDice: state.remainingDice,
     awaitingRoll: state.awaitingRoll,
     openingRollPending: state.openingRollPending,
+    showNoMoveDice: state.showNoMoveDice === true,
+    localPlayerName: state.localPlayerName,
+    playerNames: {
+      player: getPlayerName("player"),
+      ai: getPlayerName("ai"),
+    },
   };
   localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
 }
@@ -1206,6 +1332,18 @@ function loadStateFromStorage() {
   state.awaitingRoll =
     payload.awaitingRoll ?? (state.remainingDice.length === 0);
   state.openingRollPending = payload.openingRollPending === true;
+  state.showNoMoveDice = payload.showNoMoveDice === true;
+  state.localPlayerName = normalizePlayerName(
+    payload.localPlayerName || state.localPlayerName,
+  );
+  const savedNames = payload.playerNames && typeof payload.playerNames === "object"
+    ? payload.playerNames
+    : {};
+  state.playerNames = {
+    player: normalizePlayerName(savedNames.player || state.playerNames.player),
+    ai: normalizePlayerName(savedNames.ai || state.playerNames.ai),
+  };
+  state.playerNames[state.localSide] = state.localPlayerName;
   state.selectedFrom = null;
   state.message = "Loaded saved game.";
   state.lastMoveSnapshot = null;
@@ -1235,11 +1373,11 @@ function updateNetworkStatus(forcedMessage) {
     }
     if (rtc.role === "host") {
       elements.networkStatus.textContent = rtc.peerCount > 1
-        ? `${roomPrefix}Player (Guest) joined. Negotiating WebRTC...`
-        : `${roomPrefix}You are Player (Host). Waiting for Player (Guest).`;
+        ? `${roomPrefix}${sideLabel("ai")} joined. Negotiating WebRTC...`
+        : `${roomPrefix}You are ${sideLabel("player")}. Waiting for ${sideLabel("ai")}.`;
       return;
     }
-    elements.networkStatus.textContent = `${roomPrefix}You are Player (Guest). Waiting for Player (Host) offer...`;
+    elements.networkStatus.textContent = `${roomPrefix}You are ${sideLabel("ai")}. Waiting for ${sideLabel("player")} offer...`;
     return;
   }
   elements.networkStatus.textContent = "No active room.";
@@ -1482,6 +1620,10 @@ function applyRemoteGameState(payload) {
   state.remainingDice = [...payload.remainingDice];
   state.awaitingRoll = payload.awaitingRoll;
   state.openingRollPending = payload.openingRollPending === true;
+  state.showNoMoveDice = payload.showNoMoveDice === true;
+  const senderSide = payload.senderSide === "ai" ? "ai" : "player";
+  const senderName = normalizePlayerName(payload.senderName || "");
+  state.playerNames[senderSide] = senderName;
   state.message = payload.message || state.message;
   state.selectedFrom = null;
   state.lastMoveSnapshot = null;
@@ -1502,6 +1644,9 @@ function buildSyncPayload() {
     remainingDice: [...state.remainingDice],
     awaitingRoll: state.awaitingRoll,
     openingRollPending: state.openingRollPending,
+    showNoMoveDice: state.showNoMoveDice === true,
+    senderSide: state.localSide,
+    senderName: state.localPlayerName,
     message: state.message,
   };
 }
@@ -1526,9 +1671,7 @@ function attachDataChannel(channel) {
     updateNetworkStatus("Peer connected.");
     closeConnectionModal();
     render();
-    if (rtc.role === "host") {
-      syncGameStateToPeer(true);
-    }
+    syncGameStateToPeer(true);
   };
   rtc.channel.onclose = () => {
     rtc.connected = false;
@@ -1617,7 +1760,7 @@ async function startHostNegotiation() {
   if (!sendSignalPayload({ kind: "offer", description: pc.localDescription })) {
     throw new Error("Signaling channel is not open.");
   }
-  state.message = "Offer sent to Player (Guest). Waiting for answer...";
+  state.message = `Offer sent to ${sideLabel("ai")}. Waiting for answer...`;
   updateNetworkStatus();
   render();
 }
@@ -1635,7 +1778,7 @@ async function handleOfferSignal(description) {
   if (!sendSignalPayload({ kind: "answer", description: pc.localDescription })) {
     throw new Error("Could not send answer: signaling channel is closed.");
   }
-  state.message = "Answer sent. Connecting to Player (Host)...";
+  state.message = `Answer sent. Connecting to ${sideLabel("player")}...`;
   updateNetworkStatus("Answer sent. Connecting...");
   render();
 }
@@ -1692,15 +1835,16 @@ async function handleSignalingMessage(rawData) {
     rtc.peerCount = Number.isInteger(message.peerCount) ? message.peerCount : rtc.peerCount;
     rtc.role = message.role === "host" ? "host" : "guest";
     state.localSide = rtc.role === "host" ? "player" : "ai";
+    state.playerNames[state.localSide] = state.localPlayerName;
     if (rtc.role === "host") {
       ensureHostPeerConnection();
-      state.message = `Room ${rtc.roomId} ready. Share the room link with Player (Guest).`;
+      state.message = `Room ${rtc.roomId} ready. Share the room link with ${sideLabel("ai")}.`;
       if (rtc.peerCount > 1) {
         await startHostNegotiation();
       }
     } else {
       ensureGuestPeerConnection();
-      state.message = `Joined room ${rtc.roomId} as Player (Guest). Waiting for Player (Host)...`;
+      state.message = `Joined room ${rtc.roomId} as ${sideLabel("ai")}. Waiting for ${sideLabel("player")}...`;
     }
     updateNetworkStatus();
     render();
@@ -1712,7 +1856,7 @@ async function handleSignalingMessage(rawData) {
       ? message.peerCount
       : Math.max(rtc.peerCount + 1, 2);
     if (rtc.role === "host") {
-      state.message = "Player (Guest) joined. Starting connection...";
+      state.message = `${sideLabel("ai")} joined. Starting connection...`;
       updateNetworkStatus();
       render();
       await startHostNegotiation();
@@ -1759,6 +1903,7 @@ async function connectToRoom(roomValue) {
 
   clearPeerSession();
   state.gameMode = "p2p";
+  state.playerNames[state.localSide] = state.localPlayerName;
   rtc.roomId = roomId;
   rtc.generatedSignal = buildRoomInviteUrl(roomId);
   if (elements.signalInput) {
@@ -1779,6 +1924,7 @@ async function connectToRoom(roomValue) {
     clearPeerSession();
     state.gameMode = "ai";
     state.localSide = "player";
+    state.playerNames.player = state.localPlayerName;
     setRoomQueryParam("");
     throw error;
   }
@@ -1794,6 +1940,8 @@ function disconnectPeerSession() {
   rtc.roomId = "";
   state.gameMode = "ai";
   state.localSide = "player";
+  state.showNoMoveDice = false;
+  state.playerNames.player = state.localPlayerName;
   state.message = "Left room. Back to vs computer.";
   setRoomQueryParam("");
   if (elements.signalOutput) {
@@ -1985,6 +2133,31 @@ function setupListeners() {
     }
     openConnectionModal();
   });
+  elements.autoDiceToggle?.addEventListener("click", () => {
+    if (state.gameMode !== "p2p") return;
+    state.autoDiceEnabled = !state.autoDiceEnabled;
+    state.message = state.autoDiceEnabled
+      ? "Auto dice enabled for your turns."
+      : "Auto dice disabled. Roll manually.";
+    render();
+  });
+  elements.updatePlayerName?.addEventListener("click", () => {
+    setLocalPlayerName(elements.playerNameInput?.value || "", { announce: true });
+  });
+  elements.playerNameInput?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      setLocalPlayerName(elements.playerNameInput?.value || "", { announce: true });
+    }
+  });
+  elements.playerNameInput?.addEventListener("input", () => {
+    if (!elements.updatePlayerName) return;
+    const pendingName = normalizePlayerName(elements.playerNameInput?.value || "");
+    elements.updatePlayerName.disabled = pendingName === state.localPlayerName;
+  });
+  elements.playerNameInput?.addEventListener("blur", () => {
+    setLocalPlayerName(elements.playerNameInput?.value || "", { announce: false });
+  });
   elements.roomModalClose?.addEventListener("click", () => {
     closeConnectionModal();
   });
@@ -2034,7 +2207,7 @@ function setupListeners() {
   elements.copyInvite.addEventListener("click", async () => {
     try {
       await createRoomAndConnect();
-      await copySignalOutput("Room link copied. Send it to Player (Guest).");
+      await copySignalOutput(`Room link copied. Send it to ${sideLabel("ai")}.`);
     } catch (error) {
       state.message = error.message || "Failed to create room.";
       render();
@@ -2047,7 +2220,10 @@ function setupListeners() {
       void handleJoinLink();
     }
   });
-  window.addEventListener("resize", updateCheckerSize);
+  window.addEventListener("resize", () => {
+    updateCheckerSize();
+    maybeScheduleAutoDiceRoll();
+  });
   document.addEventListener("keydown", handleKeyboardShortcut);
 }
 

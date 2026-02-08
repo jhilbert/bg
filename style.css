@@ -141,6 +141,17 @@ h1 {
   border-color: rgba(123, 30, 16, 0.45);
 }
 
+.auto-dice-btn {
+  white-space: nowrap;
+}
+
+.auto-dice-btn.active {
+  background: linear-gradient(130deg, var(--accent), #158f85);
+  color: #f2fffb;
+  border-color: rgba(12, 102, 94, 0.42);
+  box-shadow: 0 10px 20px rgba(15, 118, 110, 0.28);
+}
+
 .turn-pill {
   display: flex;
   align-items: center;
@@ -694,6 +705,33 @@ button kbd {
   justify-content: center;
 }
 
+.name-editor {
+  display: grid;
+  gap: 6px;
+}
+
+.name-editor-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.name-editor input {
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid rgba(34, 46, 53, 0.24);
+  background: rgba(255, 255, 255, 0.78);
+  color: #223036;
+  padding: 8px 10px;
+  font-size: 0.82rem;
+  font-family: inherit;
+}
+
+.name-editor input:focus-visible {
+  outline: 2px solid rgba(24, 145, 132, 0.45);
+  outline-offset: 1px;
+}
+
 .board::before {
   content: "";
   position: absolute;
@@ -993,6 +1031,10 @@ button kbd {
   }
 
   .room-modal-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .name-editor-row {
     grid-template-columns: 1fr;
   }
 

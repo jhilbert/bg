@@ -10,7 +10,7 @@
     href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Manrope:wght@500;600;700;800&display=swap"
     rel="stylesheet"
   />
-  <link rel="stylesheet" href="style.css?v=V2026-02-08-6" />
+  <link rel="stylesheet" href="style.css?v=V2026-02-08-8" />
 </head>
 <body>
   <div class="ambient ambient-a" aria-hidden="true"></div>
@@ -31,6 +31,15 @@
           </div>
           <button id="room-action" class="button-primary room-action-btn" type="button">
             Play vs human
+          </button>
+          <button
+            id="auto-dice-toggle"
+            class="button-secondary auto-dice-btn"
+            type="button"
+            aria-pressed="false"
+            hidden
+          >
+            Auto dice: off
           </button>
           <div class="commit-version" id="commit-version" aria-label="Commit version"></div>
         </div>
@@ -105,6 +114,19 @@
         <button id="room-modal-close" class="button-secondary" type="button">Close</button>
       </header>
       <p class="network-status" id="network-status">Not connected.</p>
+      <section class="name-editor">
+        <label for="player-name-input" class="network-label">Your player name</label>
+        <div class="name-editor-row">
+          <input
+            id="player-name-input"
+            type="text"
+            maxlength="22"
+            autocomplete="nickname"
+            placeholder="Your name"
+          />
+          <button id="update-player-name" class="button-secondary" type="button">Update Name</button>
+        </div>
+      </section>
       <div class="room-modal-grid">
         <section class="room-modal-card">
           <h3>Create a new room</h3>
@@ -125,6 +147,6 @@
     </section>
   </div>
 
-  <script src="script.js?v=V2026-02-08-6"></script>
+  <script src="script.js?v=V2026-02-08-8"></script>
 </body>
 </html>
