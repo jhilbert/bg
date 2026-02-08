@@ -94,18 +94,17 @@
           <h2>Online PvP</h2>
           <p class="network-status" id="network-status">Not connected.</p>
           <div class="network-wizard">
-            <button id="copy-invite" class="button-primary">Copy Invite Link</button>
-            <button id="join-link" class="button-secondary">Paste From Clipboard and Join</button>
+            <button id="copy-invite" class="button-primary">Create Room Link</button>
+            <button id="join-link" class="button-secondary">Join Room</button>
             <button id="disconnect-peer" class="button-secondary">Disconnect</button>
           </div>
-          <label for="signal-input" class="network-label">Paste field (auto-filled from clipboard)</label>
-          <textarea id="signal-input" rows="3" spellcheck="false"></textarea>
-          <label for="signal-output" class="network-label">Share this link back</label>
+          <label for="signal-input" class="network-label">Room code or invite link</label>
+          <textarea id="signal-input" rows="2" spellcheck="false"></textarea>
+          <label for="signal-output" class="network-label">Share this room link</label>
           <textarea id="signal-output" rows="3" spellcheck="false" readonly></textarea>
           <p class="network-help">
-            Step 1: Host clicks Copy Invite Link and sends it to Guest. Step 2: Guest clicks Paste
-            From Clipboard and Join (it fills the paste field and generates a return link). Step 3:
-            Host clicks Paste From Clipboard and Join to apply the return link and connect.
+            Step 1: Host clicks Create Room Link and shares it. Step 2: Guest opens the room link
+            (or pastes it and clicks Join Room). Step 3: connection completes automatically.
           </p>
         </section>
       </section>
