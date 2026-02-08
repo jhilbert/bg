@@ -3,7 +3,7 @@ const TOTAL_CHECKERS = 15;
 const STORAGE_KEY = "bg-save";
 const AI_MOVE_TOTAL_MS = 3000;
 const AI_MOVE_MIN_STEP_MS = 450;
-const COMMIT_VERSION = "V2026-02-08-5";
+const COMMIT_VERSION = "V2026-02-08-6";
 const SIGNALING_BASE_URL = "https://bg-rendezvous.hilbert.workers.dev";
 const RTC_CONFIG = {
   iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
@@ -313,6 +313,32 @@ function closeConnectionModal({ renderAfter = true } = {}) {
   }
 }
 
+function updateCheckerSize() {
+  if (!elements.board) return;
+
+  const samplePoint = elements.board.querySelector(".point");
+  if (!(samplePoint instanceof HTMLElement)) return;
+
+  const sampleStack = samplePoint.querySelector(".checker-stack");
+  if (!(sampleStack instanceof HTMLElement)) return;
+
+  const pointStyles = window.getComputedStyle(samplePoint);
+  const stackStyles = window.getComputedStyle(sampleStack);
+  const stackPad = Number.parseFloat(pointStyles.getPropertyValue("--stack-pad")) || 4;
+  const stackGap = Number.parseFloat(stackStyles.rowGap || stackStyles.gap) ||
+    Number.parseFloat(pointStyles.getPropertyValue("--stack-gap")) ||
+    3;
+
+  const stackRect = sampleStack.getBoundingClientRect();
+  const availableHeight = stackRect.height - (stackPad * 2) - (stackGap * 4);
+  const availableWidth = stackRect.width - 4;
+  if (availableHeight <= 0 || availableWidth <= 0) return;
+
+  const rawSize = Math.min(availableHeight / 5, availableWidth, 88);
+  const checkerSize = Math.max(22, rawSize);
+  elements.board.style.setProperty("--checker-size-px", `${checkerSize.toFixed(2)}px`);
+}
+
 function render() {
   updateSelectionHints();
   elements.topRow.innerHTML = "";
@@ -323,6 +349,7 @@ function render() {
 
   renderRow(elements.topRow, topPoints, "top");
   renderRow(elements.bottomRow, bottomPoints, "bottom");
+  updateCheckerSize();
 
   renderDice();
   elements.turnLabel.textContent = state.openingRollPending
@@ -2020,6 +2047,7 @@ function setupListeners() {
       void handleJoinLink();
     }
   });
+  window.addEventListener("resize", updateCheckerSize);
   document.addEventListener("keydown", handleKeyboardShortcut);
 }
 

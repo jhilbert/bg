@@ -807,7 +807,6 @@ button kbd {
 }
 
 .point .checker-stack {
-  --checker-fit-height: calc((100% - (var(--stack-gap) * 4)) / 5);
   width: 100%;
   height: calc(100% - (var(--stack-pad) * 2));
   padding-block: var(--stack-pad);
@@ -830,9 +829,8 @@ button kbd {
 }
 
 .point .checker {
-  --checker-size: clamp(22px, var(--checker-fit-height), 74px);
-  width: min(var(--checker-size), calc(100% - 4px));
-  height: min(var(--checker-size), calc(100% - 4px));
+  width: var(--checker-size-px, 64px);
+  height: var(--checker-size-px, 64px);
   aspect-ratio: 1 / 1;
   flex: 0 0 auto;
 }
