@@ -22,9 +22,11 @@ Players connect with a room link only; there is no signaling URL field in the UI
 - If the endpoint changes, update `SIGNALING_BASE_URL` in `script.js`.
 
 ### 2) Use the room flow in the UI
-- Switch mode to **Online PvP (WebRTC)**.
-- Host clicks **Create Room Link** and sends it to guest.
-- Guest opens the link (or pastes room code/link and clicks **Join Room**).
+- Default mode is **Vs Computer**.
+- Click **Play vs human** in the top panel.
+- In the modal: host clicks **Create Room Link** and sends it to guest.
+- Guest opens the link (or pastes room code/link in the modal and clicks **Join Room**).
+- Once connected, the top-panel action changes to **LEAVE room**.
 - Signaling relays through Durable Objects; WebRTC connects automatically.
 
 ## Bear off mode

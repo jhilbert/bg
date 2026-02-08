@@ -28,6 +28,7 @@ const state = {
   diceOwners: [],
   gameMode: "ai",
   localSide: "player",
+  networkModalOpen: false,
   remoteSyncInProgress: false,
   lastSyncedPayload: "",
 };
@@ -69,14 +70,14 @@ const elements = {
   bearOff: document.getElementById("bear-off"),
   save: document.getElementById("save"),
   load: document.getElementById("load"),
-  gameMode: document.getElementById("game-mode"),
-  networkPanel: document.getElementById("network-panel"),
+  roomAction: document.getElementById("room-action"),
   networkStatus: document.getElementById("network-status"),
   copyInvite: document.getElementById("copy-invite"),
   joinLink: document.getElementById("join-link"),
-  disconnectPeer: document.getElementById("disconnect-peer"),
   signalInput: document.getElementById("signal-input"),
   signalOutput: document.getElementById("signal-output"),
+  roomModal: document.getElementById("room-modal"),
+  roomModalClose: document.getElementById("room-modal-close"),
   commitVersion: document.getElementById("commit-version"),
 };
 
@@ -274,6 +275,34 @@ function updateSelectionHints() {
   state.allowedSelectionDice = [...new Set(selectionMoves.map((move) => move.die))];
 }
 
+function openConnectionModal() {
+  if (!elements.roomModal) return;
+  state.networkModalOpen = true;
+  elements.roomModal.hidden = false;
+  if (state.gameMode !== "p2p") {
+    state.message = "Play vs human selected. Create or join a room.";
+  }
+  if (elements.signalInput && !elements.signalInput.value.trim()) {
+    elements.signalInput.focus();
+  }
+  render();
+}
+
+function closeConnectionModal({ renderAfter = true } = {}) {
+  if (!elements.roomModal) return;
+  state.networkModalOpen = false;
+  elements.roomModal.hidden = true;
+  if (document.activeElement instanceof HTMLElement) {
+    document.activeElement.blur();
+  }
+  requestAnimationFrame(() => {
+    elements.dice?.focus({ preventScroll: true });
+  });
+  if (renderAfter) {
+    render();
+  }
+}
+
 function render() {
   updateSelectionHints();
   elements.topRow.innerHTML = "";
@@ -341,11 +370,14 @@ function render() {
   elements.endTurn.disabled = !isLocalTurn() || state.awaitingRoll;
   elements.bearOff.disabled =
     !isLocalTurn() || state.awaitingRoll || !state.canBearOffSelection;
-  if (elements.gameMode) {
-    elements.gameMode.value = state.gameMode;
+  if (elements.roomAction) {
+    const inRoom = state.gameMode === "p2p";
+    elements.roomAction.textContent = inRoom ? "LEAVE room" : "Play vs human";
+    elements.roomAction.classList.toggle("leave", inRoom);
+    elements.roomAction.setAttribute("aria-expanded", state.networkModalOpen ? "true" : "false");
   }
-  if (elements.networkPanel) {
-    elements.networkPanel.hidden = state.gameMode !== "p2p";
+  if (elements.roomModal) {
+    elements.roomModal.hidden = !state.networkModalOpen;
   }
   updateNetworkStatus();
 
@@ -1457,6 +1489,7 @@ function attachDataChannel(channel) {
     rtc.connected = true;
     state.message = "Peer connected.";
     updateNetworkStatus("Peer connected.");
+    closeConnectionModal();
     render();
     if (rtc.role === "host") {
       syncGameStateToPeer(true);
@@ -1691,9 +1724,6 @@ async function connectToRoom(roomValue) {
 
   clearPeerSession();
   state.gameMode = "p2p";
-  if (elements.gameMode) {
-    elements.gameMode.value = "p2p";
-  }
   rtc.roomId = roomId;
   rtc.generatedSignal = buildRoomInviteUrl(roomId);
   if (elements.signalInput) {
@@ -1711,8 +1741,10 @@ async function connectToRoom(roomValue) {
   try {
     await openSignalingSocket(signalingBaseUrl, roomId);
   } catch (error) {
-    closePeerTransport();
-    rtc.signalingSocket = null;
+    clearPeerSession();
+    state.gameMode = "ai";
+    state.localSide = "player";
+    setRoomQueryParam("");
     throw error;
   }
 }
@@ -1725,10 +1757,14 @@ async function createRoomAndConnect() {
 function disconnectPeerSession() {
   clearPeerSession();
   rtc.roomId = "";
+  state.gameMode = "ai";
+  state.localSide = "player";
+  state.message = "Left room. Back to vs computer.";
   setRoomQueryParam("");
   if (elements.signalOutput) {
     elements.signalOutput.value = "";
   }
+  closeConnectionModal({ renderAfter: false });
   updateNetworkStatus("Disconnected.");
   render();
 }
@@ -1811,32 +1847,12 @@ async function handleJoinLink() {
   }
 }
 
-function switchGameMode(mode) {
-  if (mode === state.gameMode) {
-    render();
-    return;
-  }
-  if (mode === "p2p") {
-    state.gameMode = "p2p";
-    state.message = "Online PvP enabled. Create or join a room.";
-    render();
-    return;
-  }
-  disconnectPeerSession();
-  state.gameMode = "ai";
-  state.localSide = "player";
-  initBoard();
-}
-
 async function prefillSignalFromQuery() {
   const params = new URLSearchParams(window.location.search);
   const room = normalizeRoomCode(params.get("room") || "");
   if (!room) return;
 
   state.gameMode = "p2p";
-  if (elements.gameMode) {
-    elements.gameMode.value = "p2p";
-  }
   if (elements.signalInput) {
     elements.signalInput.value = room;
   }
@@ -1852,6 +1868,14 @@ async function prefillSignalFromQuery() {
 
 function handleKeyboardShortcut(event) {
   if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
+  const key = event.key.toLowerCase();
+  if (state.networkModalOpen) {
+    if (key === "escape") {
+      event.preventDefault();
+      closeConnectionModal();
+    }
+    return;
+  }
   const target = event.target;
   const isEditable =
     target instanceof HTMLElement &&
@@ -1860,8 +1884,6 @@ function handleKeyboardShortcut(event) {
       target.tagName === "TEXTAREA" ||
       target.tagName === "SELECT");
   if (isEditable) return;
-
-  const key = event.key.toLowerCase();
   if (key === "enter") {
     if (canLocalRoll()) {
       event.preventDefault();
@@ -1921,6 +1943,22 @@ function handleKeyboardShortcut(event) {
 }
 
 function setupListeners() {
+  elements.roomAction?.addEventListener("click", () => {
+    if (state.gameMode === "p2p") {
+      disconnectPeerSession();
+      return;
+    }
+    openConnectionModal();
+  });
+  elements.roomModalClose?.addEventListener("click", () => {
+    closeConnectionModal();
+  });
+  elements.roomModal?.addEventListener("click", (event) => {
+    if (event.target === elements.roomModal) {
+      closeConnectionModal();
+    }
+  });
+
   elements.board.addEventListener("click", handleBoardClick);
   elements.dice.addEventListener("click", () => {
     if (!canLocalRoll()) return;
@@ -1959,9 +1997,6 @@ function setupListeners() {
     render();
   });
   elements.load.addEventListener("click", loadStateFromStorage);
-  elements.gameMode.addEventListener("change", (event) => {
-    switchGameMode(event.target.value);
-  });
   elements.copyInvite.addEventListener("click", async () => {
     try {
       await createRoomAndConnect();
@@ -1972,7 +2007,12 @@ function setupListeners() {
     }
   });
   elements.joinLink.addEventListener("click", handleJoinLink);
-  elements.disconnectPeer.addEventListener("click", disconnectPeerSession);
+  elements.signalInput?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      void handleJoinLink();
+    }
+  });
   document.addEventListener("keydown", handleKeyboardShortcut);
 }
 
