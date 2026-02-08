@@ -79,11 +79,30 @@ function otherSide(side) {
   return side === "player" ? "ai" : "player";
 }
 
-function capitalizeSide(side) {
+function sideLabel(side) {
   if (state.gameMode === "p2p") {
-    return side === "player" ? "Host" : "Guest";
+    return side === "player" ? "Player (Host)" : "Player (Guest)";
   }
-  return capitalize(side);
+  return side === "player" ? "Player" : "Computer";
+}
+
+function sideBarLabel(side) {
+  if (state.gameMode === "p2p") {
+    return side === "player" ? "PLAYER (HOST) BAR" : "PLAYER (GUEST) BAR";
+  }
+  return side === "player" ? "PLAYER BAR" : "AI BAR";
+}
+
+function sideCardLabel(side) {
+  const baseLabel = sideLabel(side);
+  if (state.gameMode === "p2p" && side === state.localSide) {
+    return `${baseLabel} (You)`;
+  }
+  return baseLabel;
+}
+
+function capitalizeSide(side) {
+  return sideLabel(side);
 }
 
 function isLocalTurn() {
@@ -198,7 +217,7 @@ function handleOpeningRoll() {
   state.openingRollPending = false;
   state.turn = winner;
   state.remainingDice = [...state.dice];
-  state.message = `Opening roll: Player ${playerDie}, AI ${aiDie}. ${capitalizeSide(winner)} starts.`;
+  state.message = `Opening roll: ${sideLabel("player")} ${playerDie}, ${sideLabel("ai")} ${aiDie}. ${capitalizeSide(winner)} starts.`;
   render();
   syncGameStateToPeer();
 
@@ -264,16 +283,16 @@ function render() {
   renderDice();
   elements.turnLabel.textContent = state.openingRollPending
     ? "Opening Roll"
-    : capitalizeSide(state.turn);
+    : sideLabel(state.turn);
   if (elements.subtitle) {
     elements.subtitle.textContent =
       state.gameMode === "p2p" ? "Online peer-to-peer match" : "Single-player vs. the computer";
   }
   if (elements.playerTitle) {
-    elements.playerTitle.textContent = state.gameMode === "p2p" ? "Player (Host)" : "Player";
+    elements.playerTitle.textContent = sideCardLabel("player");
   }
   if (elements.opponentTitle) {
-    elements.opponentTitle.textContent = state.gameMode === "p2p" ? "Player (Guest)" : "Computer";
+    elements.opponentTitle.textContent = sideCardLabel("ai");
   }
   elements.playerOff.textContent = state.off.player;
   elements.aiOff.textContent = state.off.ai;
@@ -357,7 +376,7 @@ function renderRow(container, points, row) {
       }
 
       const label = document.createElement("div");
-      label.textContent = row === "top" ? "AI BAR" : "PLAYER BAR";
+      label.textContent = sideBarLabel(row === "top" ? "ai" : "player");
       const stack = document.createElement("div");
       stack.className = "checker-stack";
       const count = row === "top" ? state.bar.ai : state.bar.player;
@@ -1133,15 +1152,20 @@ function updateNetworkStatus(forcedMessage) {
     return;
   }
   if (rtc.connected) {
-    elements.networkStatus.textContent = `Connected (${rtc.role || "peer"}).`;
+    const localRoleLabel = rtc.role === "host"
+      ? "Player (Host)"
+      : rtc.role === "guest"
+        ? "Player (Guest)"
+        : "peer";
+    elements.networkStatus.textContent = `Connected. You are ${localRoleLabel}.`;
     return;
   }
   if (rtc.role === "host" && rtc.pc) {
-    elements.networkStatus.textContent = "Invite created. Waiting for your opponent.";
+    elements.networkStatus.textContent = "Invite created. You are Player (Host), waiting for Player (Guest).";
     return;
   }
   if (rtc.role === "guest" && rtc.pc) {
-    elements.networkStatus.textContent = "Return link created. Waiting for host.";
+    elements.networkStatus.textContent = "Return link created. You are Player (Guest), waiting for Player (Host).";
     return;
   }
   elements.networkStatus.textContent = "No active session.";
@@ -1395,8 +1419,8 @@ async function createOfferSignal() {
   if (elements.signalOutput) {
     elements.signalOutput.value = url;
   }
-  state.message = "Invite link created. Share it with your opponent.";
-  updateNetworkStatus("Invite created. Waiting for your opponent.");
+  state.message = "Invite link created for Player (Host). Share it with Player (Guest).";
+  updateNetworkStatus("Invite created. You are Player (Host), waiting for Player (Guest).");
   render();
 }
 
@@ -1414,8 +1438,8 @@ async function acceptOfferSignal(descriptor) {
   if (elements.signalOutput) {
     elements.signalOutput.value = url;
   }
-  state.message = "Return link created. Send it back to the host.";
-  updateNetworkStatus("Return link created. Waiting for host.");
+  state.message = "Return link created for Player (Guest). Send it back to Player (Host).";
+  updateNetworkStatus("Return link created. You are Player (Guest), waiting for Player (Host).");
   render();
 }
 
@@ -1446,7 +1470,7 @@ async function copySignalOutput(successMessage) {
     return false;
   }
   try {
-    await navigator.clipboard.writeText(code);
+    await writeClipboardText(code);
     state.message = successMessage || "Link copied.";
   } catch (error) {
     state.message = "Clipboard copy failed. Copy manually.";
@@ -1455,13 +1479,64 @@ async function copySignalOutput(successMessage) {
   return true;
 }
 
+async function writeClipboardText(value) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const fallback = document.createElement("textarea");
+  fallback.value = value;
+  fallback.setAttribute("readonly", "");
+  fallback.style.position = "fixed";
+  fallback.style.opacity = "0";
+  fallback.style.pointerEvents = "none";
+  document.body.appendChild(fallback);
+  fallback.focus();
+  fallback.select();
+  const didCopy = document.execCommand("copy");
+  document.body.removeChild(fallback);
+  if (!didCopy) {
+    throw new Error("Clipboard copy is unavailable.");
+  }
+}
+
+async function readClipboardText() {
+  if (!navigator.clipboard?.readText) {
+    throw new Error("Clipboard paste is unavailable in this browser.");
+  }
+  return navigator.clipboard.readText();
+}
+
+async function pasteSignalInputFromClipboard() {
+  if (!elements.signalInput) return false;
+  const text = (await readClipboardText()).trim();
+  if (!text) {
+    throw new Error("Clipboard is empty.");
+  }
+  elements.signalInput.value = text;
+  return true;
+}
+
 async function handleJoinLink() {
   try {
+    try {
+      await pasteSignalInputFromClipboard();
+    } catch (error) {
+      if (!(elements.signalInput?.value.trim() || "")) {
+        state.message = error.message || "Paste an invite/return link first.";
+        render();
+        return;
+      }
+    }
     const parsed = parseSignalInput(elements.signalInput?.value || "");
-    if (!parsed) return;
+    if (!parsed) {
+      state.message = "Paste an invite/return link first.";
+      render();
+      return;
+    }
     if (parsed.kind === "offer") {
       await acceptOfferSignal(parsed.descriptor);
-      await copySignalOutput("Return link copied. Send it back to the host.");
+      await copySignalOutput("Return link copied. Send it back to Player (Host).");
     } else {
       await acceptAnswerSignal(parsed.descriptor);
     }
@@ -1503,8 +1578,8 @@ function prefillSignalFromQuery() {
     elements.signalInput.value = window.location.search;
   }
   state.message = offer
-    ? "Invite link detected. Click Paste Link and Join to join."
-    : "Return link detected. Host: click Paste Link and Join.";
+    ? "Invite link detected. Click Paste From Clipboard and Join to join."
+    : "Return link detected. Player (Host): click Paste From Clipboard and Join.";
 }
 
 function handleKeyboardShortcut(event) {
@@ -1622,7 +1697,7 @@ function setupListeners() {
   elements.copyInvite.addEventListener("click", async () => {
     try {
       await createOfferSignal();
-      await copySignalOutput("Invite link copied. Send it to your opponent.");
+      await copySignalOutput("Invite link copied. Send it to Player (Guest).");
     } catch (error) {
       state.message = error.message || "Failed to create offer.";
       render();
