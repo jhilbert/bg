@@ -4,7 +4,7 @@ const STORAGE_KEY = "bg-save";
 const PROFILE_STORAGE_KEY = "bg-profile";
 const AI_MOVE_TOTAL_MS = 3000;
 const AI_MOVE_MIN_STEP_MS = 450;
-const COMMIT_VERSION = "V2026-02-09-7";
+const COMMIT_VERSION = "V2026-02-09-8";
 const SIGNALING_BASE_URL = "https://bg-rendezvous.hilbert.workers.dev";
 const RTC_CONFIG = {
   iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
@@ -1771,9 +1771,9 @@ async function reservePlayerName(playerName, { claim = false } = {}) {
   };
 }
 
-async function releasePlayerName(playerName) {
+async function releasePlayerName(playerName, { strict = false } = {}) {
   const normalizedName = normalizePlayerName(playerName);
-  if (!normalizedName) return;
+  if (!normalizedName) return true;
   const baseUrl = getSignalingBaseUrl();
   const endpoint = new URL(getNameEndpointUrl(baseUrl, normalizedName));
   endpoint.searchParams.set("client", ensureLocalClientId());
@@ -1781,9 +1781,23 @@ async function releasePlayerName(playerName) {
     method: "DELETE",
     cache: "no-store",
   });
-  if (!response.ok) {
-    throw new Error(`Could not release name (${response.status}).`);
+  let payload = {};
+  try {
+    payload = await response.json();
+  } catch {
+    payload = {};
   }
+  if (response.ok) {
+    return true;
+  }
+  const reason = String(payload?.reason || "");
+  if (!strict && (response.status === 409 || reason === "not-owner")) {
+    return false;
+  }
+  const message = typeof payload?.error === "string" && payload.error
+    ? payload.error
+    : `Could not release name (${response.status}).`;
+  throw new Error(message);
 }
 
 async function submitPlayerNameUpdate({ claim = false, announce = true } = {}) {
