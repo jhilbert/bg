@@ -10,7 +10,7 @@
     href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Manrope:wght@500;600;700;800&display=swap"
     rel="stylesheet"
   />
-  <link rel="stylesheet" href="style.css?v=V2026-02-08-8" />
+  <link rel="stylesheet" href="style.css?v=V2026-02-09-4" />
 </head>
 <body>
   <div class="ambient ambient-a" aria-hidden="true"></div>
@@ -30,7 +30,7 @@
             <span id="turn-label"></span>
           </div>
           <button id="room-action" class="button-primary room-action-btn" type="button">
-            Play vs human
+            Rooms
           </button>
           <button
             id="auto-dice-toggle"
@@ -90,8 +90,6 @@
             <button id="end-turn" class="button-accent" title="Shortcut: E">End Turn <kbd>E</kbd></button>
             <button id="undo-move" class="button-secondary" title="Shortcut: U">Undo <kbd>U</kbd></button>
             <button id="bear-off" class="button-secondary" title="Shortcut: B">Bear Off <kbd>B</kbd></button>
-            <button id="save" class="button-secondary" title="Shortcut: S">Save <kbd>S</kbd></button>
-            <button id="load" class="button-secondary" title="Shortcut: L">Load <kbd>L</kbd></button>
           </div>
         </section>
       </section>
@@ -110,7 +108,7 @@
   <div class="room-modal-backdrop" id="room-modal" hidden>
     <section class="room-modal" role="dialog" aria-modal="true" aria-labelledby="room-modal-title">
       <header class="room-modal-header">
-        <h2 id="room-modal-title">Play Vs Human</h2>
+        <h2 id="room-modal-title">Rooms</h2>
         <button id="room-modal-close" class="button-secondary" type="button">Close</button>
       </header>
       <p class="network-status" id="network-status">Not connected.</p>
@@ -127,26 +125,38 @@
           <button id="update-player-name" class="button-secondary" type="button">Update Name</button>
         </div>
       </section>
-      <div class="room-modal-grid">
-        <section class="room-modal-card">
-          <h3>Create a new room</h3>
-          <button id="copy-invite" class="button-primary" type="button">Create Room Link</button>
-          <label for="signal-output" class="network-label">Share this room link</label>
-          <textarea id="signal-output" rows="3" spellcheck="false" readonly></textarea>
-        </section>
-        <section class="room-modal-card">
-          <h3>Join an existing room</h3>
-          <label for="signal-input" class="network-label">Room code or room link</label>
-          <textarea id="signal-input" rows="3" spellcheck="false"></textarea>
-          <button id="join-link" class="button-accent" type="button">Join Room</button>
-        </section>
-      </div>
-      <p class="network-help">
-        Host: create and share room link. Guest: open that link or paste it here and join.
-      </p>
+      <section class="room-modal-card room-browser">
+        <header class="room-browser-header">
+          <h3>Active rooms</h3>
+          <button id="refresh-rooms" class="button-secondary" type="button">Refresh</button>
+        </header>
+        <p class="network-help">Create a room or join one with a single player waiting.</p>
+        <div class="room-browser-actions">
+          <button id="create-room" class="button-primary" type="button">Create New Room</button>
+        </div>
+        <p class="room-browser-status" id="rooms-loading" hidden>Loading rooms...</p>
+        <p class="room-browser-status error" id="rooms-error" hidden></p>
+        <ul class="room-list" id="room-list"></ul>
+        <p class="network-help" id="room-list-empty" hidden>No active rooms yet. Create one to start.</p>
+      </section>
     </section>
   </div>
 
-  <script src="script.js?v=V2026-02-08-8"></script>
+  <div class="room-modal-backdrop" id="resign-modal" hidden>
+    <section class="room-modal resign-modal" role="dialog" aria-modal="true" aria-labelledby="resign-modal-title">
+      <header class="room-modal-header">
+        <h2 id="resign-modal-title">Confirm Resign</h2>
+        <button id="resign-modal-close" class="button-secondary" type="button">Cancel</button>
+      </header>
+      <p class="network-help">Resigning ends the current game immediately.</p>
+      <p class="network-help">Your opponent will be notified.</p>
+      <div class="resign-modal-actions">
+        <button id="resign-confirm" class="button-accent" type="button">Confirm Resign</button>
+        <button id="resign-cancel" class="button-secondary" type="button">Keep Playing</button>
+      </div>
+    </section>
+  </div>
+
+  <script src="script.js?v=V2026-02-09-4"></script>
 </body>
 </html>

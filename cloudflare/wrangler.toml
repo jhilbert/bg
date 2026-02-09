@@ -7,6 +7,14 @@ workers_dev = true
 name = "RENDEZVOUS"
 class_name = "RendezvousRoom"
 
+[[durable_objects.bindings]]
+name = "ROOM_DIRECTORY"
+class_name = "RoomDirectory"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["RendezvousRoom"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["RoomDirectory"]

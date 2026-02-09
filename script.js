@@ -3,7 +3,7 @@ const TOTAL_CHECKERS = 15;
 const STORAGE_KEY = "bg-save";
 const AI_MOVE_TOTAL_MS = 3000;
 const AI_MOVE_MIN_STEP_MS = 450;
-const COMMIT_VERSION = "V2026-02-08-8";
+const COMMIT_VERSION = "V2026-02-09-4";
 const SIGNALING_BASE_URL = "https://bg-rendezvous.hilbert.workers.dev";
 const RTC_CONFIG = {
   iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
@@ -35,6 +35,13 @@ const state = {
   networkModalOpen: false,
   remoteSyncInProgress: false,
   lastSyncedPayload: "",
+  availableRooms: [],
+  roomsLoading: false,
+  roomsError: "",
+  gameOver: false,
+  winnerSide: "",
+  resignedBySide: "",
+  resignModalOpen: false,
 };
 
 const rtc = {
@@ -50,6 +57,7 @@ const rtc = {
 };
 
 let autoDiceRollTimer = null;
+let roomListPollTimer = null;
 
 const elements = {
   topRow: document.getElementById("top-row"),
@@ -74,19 +82,23 @@ const elements = {
   endTurn: document.getElementById("end-turn"),
   undoMove: document.getElementById("undo-move"),
   bearOff: document.getElementById("bear-off"),
-  save: document.getElementById("save"),
-  load: document.getElementById("load"),
   roomAction: document.getElementById("room-action"),
   autoDiceToggle: document.getElementById("auto-dice-toggle"),
   playerNameInput: document.getElementById("player-name-input"),
   updatePlayerName: document.getElementById("update-player-name"),
   networkStatus: document.getElementById("network-status"),
-  copyInvite: document.getElementById("copy-invite"),
-  joinLink: document.getElementById("join-link"),
-  signalInput: document.getElementById("signal-input"),
-  signalOutput: document.getElementById("signal-output"),
+  createRoom: document.getElementById("create-room"),
+  refreshRooms: document.getElementById("refresh-rooms"),
+  roomList: document.getElementById("room-list"),
+  roomListEmpty: document.getElementById("room-list-empty"),
+  roomsLoading: document.getElementById("rooms-loading"),
+  roomsError: document.getElementById("rooms-error"),
   roomModal: document.getElementById("room-modal"),
   roomModalClose: document.getElementById("room-modal-close"),
+  resignModal: document.getElementById("resign-modal"),
+  resignModalClose: document.getElementById("resign-modal-close"),
+  resignConfirm: document.getElementById("resign-confirm"),
+  resignCancel: document.getElementById("resign-cancel"),
   commitVersion: document.getElementById("commit-version"),
 };
 
@@ -132,6 +144,10 @@ function setLocalPlayerName(rawValue, { announce = false, sync = true } = {}) {
       : "Player name cleared. Using Host/Guest labels.";
   }
   render();
+  if (state.gameMode === "p2p") {
+    sendPlayerNameToSignaling();
+    void fetchAvailableRooms({ silent: true });
+  }
   if (sync) {
     syncGameStateToPeer(true);
   }
@@ -173,9 +189,139 @@ function isAiControlledTurn() {
 }
 
 function canLocalRoll() {
+  if (state.gameOver) return false;
   if (!state.awaitingRoll) return false;
   if (state.openingRollPending) return state.localSide === "player";
   return isLocalTurn();
+}
+
+function canStartNewGameLocally() {
+  return state.gameMode !== "p2p" || state.localSide === "player";
+}
+
+function markGameOver({ winnerSide = "", resignedBySide = "", message = "" } = {}) {
+  state.gameOver = true;
+  state.winnerSide = winnerSide === "ai" || winnerSide === "player" ? winnerSide : "";
+  state.resignedBySide = resignedBySide === "ai" || resignedBySide === "player"
+    ? resignedBySide
+    : "";
+  state.selectedFrom = null;
+  state.lastMoveSnapshot = null;
+  state.awaitingRoll = false;
+  state.remainingDice = [];
+  state.diceOwners = [];
+  state.showNoMoveDice = false;
+  state.autoDiceEnabled = false;
+  if (message) {
+    state.message = message;
+  }
+}
+
+function closeResignModal({ renderAfter = true } = {}) {
+  if (!elements.resignModal) return;
+  state.resignModalOpen = false;
+  elements.resignModal.hidden = true;
+  if (renderAfter) {
+    render();
+  }
+}
+
+function openResignModal() {
+  if (!elements.resignModal || state.gameOver) return;
+  state.resignModalOpen = true;
+  elements.resignModal.hidden = false;
+  if (elements.resignConfirm) {
+    elements.resignConfirm.focus();
+  }
+  render();
+}
+
+function notifyPeerResigned() {
+  if (state.gameMode !== "p2p") return;
+  const payload = {
+    type: "resign",
+    side: state.localSide,
+    name: state.localPlayerName,
+  };
+  if (rtc.channel && rtc.channel.readyState === "open") {
+    rtc.channel.send(JSON.stringify(payload));
+  }
+  sendSignalPayload({
+    kind: "resign",
+    side: state.localSide,
+    name: state.localPlayerName,
+  });
+}
+
+function applyResignOutcome({
+  resignedBySide,
+  resignedByName = "",
+  localInitiated = false,
+} = {}) {
+  const resignedSide = resignedBySide === "ai" ? "ai" : "player";
+  const winner = otherSide(resignedSide);
+  const normalizedName = normalizePlayerName(resignedByName);
+
+  if (normalizedName) {
+    state.playerNames[resignedSide] = normalizedName;
+  }
+  state.playerNames[state.localSide] = state.localPlayerName;
+
+  const resignedLabel = normalizedName
+    ? `Player (${normalizedName})`
+    : sideLabel(resignedSide);
+  const message = localInitiated
+    ? `You resigned. ${capitalizeSide(winner)} wins! Press New Game to play again.`
+    : `${resignedLabel} resigned. ${capitalizeSide(winner)} wins! Press New Game to play again.`;
+
+  markGameOver({
+    winnerSide: winner,
+    resignedBySide: resignedSide,
+    message,
+  });
+}
+
+function handleRemoteResignNotice(payload = {}) {
+  const resignedSide = payload.side === "ai" ? "ai" : "player";
+  if (state.gameOver && state.resignedBySide === resignedSide) {
+    return;
+  }
+  applyResignOutcome({
+    resignedBySide: resignedSide,
+    resignedByName: payload.name || "",
+    localInitiated: false,
+  });
+  closeResignModal({ renderAfter: false });
+  render();
+}
+
+function confirmResign() {
+  if (state.gameOver) {
+    closeResignModal();
+    return;
+  }
+  applyResignOutcome({
+    resignedBySide: state.localSide,
+    resignedByName: state.localPlayerName,
+    localInitiated: true,
+  });
+  closeResignModal({ renderAfter: false });
+  notifyPeerResigned();
+  syncGameStateToPeer(true);
+  render();
+}
+
+function handlePrimaryGameAction() {
+  if (state.gameOver) {
+    if (!canStartNewGameLocally()) {
+      state.message = "Only host can start a new network game.";
+      render();
+      return;
+    }
+    initBoard();
+    return;
+  }
+  openResignModal();
 }
 
 function clearAutoDiceRollTimer() {
@@ -239,8 +385,12 @@ function initBoard() {
   state.openingRollPending = true;
   state.diceOwners = [];
   state.showNoMoveDice = false;
+  state.gameOver = false;
+  state.winnerSide = "";
+  state.resignedBySide = "";
   state.playerNames[state.localSide] = state.localPlayerName;
   state.message = "Opening roll: click the dice to decide who starts.";
+  closeResignModal({ renderAfter: false });
   render();
   syncGameStateToPeer();
 }
@@ -255,6 +405,11 @@ function rollDie() {
 }
 
 function rollForTurn() {
+  if (state.gameOver) {
+    state.message = "Game is over. Start a new game.";
+    render();
+    return;
+  }
   if (state.openingRollPending) {
     handleOpeningRoll();
     return;
@@ -380,11 +535,15 @@ function openConnectionModal() {
   state.networkModalOpen = true;
   elements.roomModal.hidden = false;
   if (state.gameMode !== "p2p") {
-    state.message = "Play vs human selected. Create or join a room.";
+    state.message = "Rooms opened. Create or join a room.";
   }
-  if (elements.signalInput && !elements.signalInput.value.trim()) {
-    elements.signalInput.focus();
+  if (elements.playerNameInput && !state.localPlayerName) {
+    elements.playerNameInput.focus();
+  } else if (elements.createRoom) {
+    elements.createRoom.focus();
   }
+  startRoomListPolling();
+  void fetchAvailableRooms();
   render();
 }
 
@@ -392,6 +551,7 @@ function closeConnectionModal({ renderAfter = true } = {}) {
   if (!elements.roomModal) return;
   state.networkModalOpen = false;
   elements.roomModal.hidden = true;
+  stopRoomListPolling();
   if (document.activeElement instanceof HTMLElement) {
     document.activeElement.blur();
   }
@@ -492,21 +652,39 @@ function render() {
   );
   elements.board.classList.toggle("player-turn", state.turn === "player");
   elements.board.classList.toggle("ai-turn", state.turn === "ai");
+
+  if (elements.newGame) {
+    if (state.gameOver) {
+      elements.newGame.textContent = "New Game";
+      const kbd = document.createElement("kbd");
+      kbd.textContent = "N";
+      elements.newGame.append(" ", kbd);
+      elements.newGame.title = "Shortcut: N";
+      elements.newGame.disabled = !canStartNewGameLocally();
+    } else {
+      elements.newGame.textContent = "Resign";
+      const kbd = document.createElement("kbd");
+      kbd.textContent = "N";
+      elements.newGame.append(" ", kbd);
+      elements.newGame.title = "Shortcut: N";
+      elements.newGame.disabled = false;
+    }
+  }
+
   elements.undoMove.disabled =
-    !isLocalTurn() || state.awaitingRoll || !state.lastMoveSnapshot;
-  elements.endTurn.disabled = !isLocalTurn() || state.awaitingRoll;
+    state.gameOver || !isLocalTurn() || state.awaitingRoll || !state.lastMoveSnapshot;
+  elements.endTurn.disabled = state.gameOver || !isLocalTurn() || state.awaitingRoll;
   elements.bearOff.disabled =
-    !isLocalTurn() || state.awaitingRoll || !state.canBearOffSelection;
+    state.gameOver || !isLocalTurn() || state.awaitingRoll || !state.canBearOffSelection;
   if (elements.roomAction) {
-    const inRoom = state.gameMode === "p2p";
-    elements.roomAction.textContent = inRoom ? "LEAVE room" : "Play vs human";
-    elements.roomAction.classList.toggle("leave", inRoom);
+    elements.roomAction.textContent = "Rooms";
+    elements.roomAction.classList.remove("leave");
     elements.roomAction.setAttribute("aria-expanded", state.networkModalOpen ? "true" : "false");
   }
   if (elements.autoDiceToggle) {
     const showToggle = state.gameMode === "p2p";
     elements.autoDiceToggle.hidden = !showToggle;
-    elements.autoDiceToggle.disabled = !showToggle;
+    elements.autoDiceToggle.disabled = !showToggle || state.gameOver;
     elements.autoDiceToggle.classList.toggle("active", state.autoDiceEnabled);
     elements.autoDiceToggle.textContent = state.autoDiceEnabled
       ? "Auto dice: on"
@@ -527,8 +705,22 @@ function render() {
     const pendingName = normalizePlayerName(elements.playerNameInput.value);
     elements.updatePlayerName.disabled = pendingName === state.localPlayerName;
   }
+  if (elements.refreshRooms) {
+    elements.refreshRooms.disabled = state.roomsLoading;
+  }
+  if (elements.createRoom) {
+    const localPlayerInRoom = state.gameMode === "p2p" && Boolean(rtc.roomId);
+    elements.createRoom.disabled = localPlayerInRoom;
+    elements.createRoom.title = localPlayerInRoom
+      ? "Leave your current room first."
+      : "";
+  }
+  renderRoomList();
   if (elements.roomModal) {
     elements.roomModal.hidden = !state.networkModalOpen;
+  }
+  if (elements.resignModal) {
+    elements.resignModal.hidden = !state.resignModalOpen;
   }
   updateNetworkStatus();
   maybeScheduleAutoDiceRoll();
@@ -714,6 +906,7 @@ function createDieFace(value) {
 }
 
 function handleBoardClick(event) {
+  if (state.gameOver) return;
   if (!isLocalTurn()) return;
   if (state.awaitingRoll) {
     state.message = state.openingRollPending
@@ -791,6 +984,7 @@ function consumeDie(die) {
 }
 
 function handleBearOff() {
+  if (state.gameOver) return;
   if (!isLocalTurn()) return;
   const localSide = state.localSide;
   if (state.awaitingRoll) {
@@ -822,6 +1016,7 @@ function handleBearOff() {
 }
 
 function endTurn() {
+  if (state.gameOver) return;
   if (!isLocalTurn()) return;
   if (state.awaitingRoll) {
     state.message = "Roll the dice before ending your turn.";
@@ -850,6 +1045,7 @@ function endTurn() {
 }
 
 function runAiTurn() {
+  if (state.gameOver) return;
   if (state.gameMode !== "ai" || state.turn !== "ai") return;
   const sequences = generateMoveSequences(state, "ai", state.remainingDice);
   if (sequences.length === 0) {
@@ -1183,7 +1379,10 @@ function evaluateState(currentState) {
 
 function checkWin(player) {
   if (state.off[player] >= TOTAL_CHECKERS) {
-    state.message = `${capitalizeSide(player)} wins! Start a new game to play again.`;
+    markGameOver({
+      winnerSide: player,
+      message: `${capitalizeSide(player)} wins! Press New Game to play again.`,
+    });
     render();
     syncGameStateToPeer();
     return true;
@@ -1202,6 +1401,7 @@ function formatMove(move) {
 }
 
 function startPlayerTurn() {
+  if (state.gameOver) return;
   state.turn = "player";
   state.openingRollPending = false;
   state.selectedFrom = null;
@@ -1265,6 +1465,11 @@ function animateAiMoves(moves, moveSummary) {
   let index = 0;
 
   const applyNextMove = () => {
+    if (state.gameOver) {
+      state.aiMoveHighlights = { from: [], to: [] };
+      render();
+      return;
+    }
     if (index >= moves.length) {
       state.aiMoveHighlights = { from: [], to: [] };
       state.message = `AI rolled ${state.dice.join(", ")}. Moves: ${moveSummary}.`;
@@ -1301,6 +1506,9 @@ function saveStateToStorage() {
     awaitingRoll: state.awaitingRoll,
     openingRollPending: state.openingRollPending,
     showNoMoveDice: state.showNoMoveDice === true,
+    gameOver: state.gameOver === true,
+    winnerSide: state.winnerSide,
+    resignedBySide: state.resignedBySide,
     localPlayerName: state.localPlayerName,
     playerNames: {
       player: getPlayerName("player"),
@@ -1333,6 +1541,13 @@ function loadStateFromStorage() {
     payload.awaitingRoll ?? (state.remainingDice.length === 0);
   state.openingRollPending = payload.openingRollPending === true;
   state.showNoMoveDice = payload.showNoMoveDice === true;
+  state.gameOver = payload.gameOver === true;
+  state.winnerSide = payload.winnerSide === "ai" || payload.winnerSide === "player"
+    ? payload.winnerSide
+    : "";
+  state.resignedBySide = payload.resignedBySide === "ai" || payload.resignedBySide === "player"
+    ? payload.resignedBySide
+    : "";
   state.localPlayerName = normalizePlayerName(
     payload.localPlayerName || state.localPlayerName,
   );
@@ -1405,12 +1620,281 @@ function getSignalingBaseUrl() {
   return normalized;
 }
 
-function buildSignalingSocketUrl(baseUrl, roomId) {
+function getRoomsEndpointUrl(baseUrl) {
+  const url = new URL(baseUrl);
+  const basePath = url.pathname.replace(/\/+$/, "");
+  url.pathname = `${basePath}/rooms`;
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
+
+function normalizeRoomRoster(players) {
+  if (!Array.isArray(players)) return [];
+  const seenRoles = new Set();
+  const normalized = [];
+  for (const player of players) {
+    if (!player || typeof player !== "object") continue;
+    const role = player.role === "guest" ? "guest" : "host";
+    if (seenRoles.has(role)) continue;
+    seenRoles.add(role);
+    normalized.push({
+      role,
+      name: normalizePlayerName(player.name || ""),
+    });
+  }
+  normalized.sort((left, right) => {
+    if (left.role === right.role) return 0;
+    return left.role === "host" ? -1 : 1;
+  });
+  return normalized.slice(0, 2);
+}
+
+function normalizeRoomDirectory(payload) {
+  if (!payload || !Array.isArray(payload.rooms)) return [];
+  const normalizedRooms = payload.rooms
+    .map((room) => {
+      if (!room || typeof room !== "object") return null;
+      const roomId = normalizeRoomCode(room.roomId || "");
+      if (!roomId) return null;
+      const players = normalizeRoomRoster(room.players);
+      const rawCount = Number.isFinite(room.playerCount) ? room.playerCount : players.length;
+      const playerCount = Math.min(2, Math.max(players.length, rawCount, 0));
+      if (playerCount < 1) return null;
+      const updatedAt = Number.isFinite(room.updatedAt) ? room.updatedAt : 0;
+      const occupiedRoles = new Set(players.map((player) => player.role));
+      const openRole = playerCount < 2
+        ? (occupiedRoles.has("host") ? "guest" : "host")
+        : "";
+      return {
+        roomId,
+        players,
+        playerCount,
+        openSeat: playerCount === 1,
+        openRole,
+        updatedAt,
+      };
+    })
+    .filter(Boolean);
+
+  normalizedRooms.sort((left, right) => {
+    const updatedDelta = right.updatedAt - left.updatedAt;
+    if (updatedDelta !== 0) return updatedDelta;
+    return left.roomId.localeCompare(right.roomId);
+  });
+  return normalizedRooms;
+}
+
+function roomRoleLabel(role) {
+  return role === "guest" ? "Guest" : "Host";
+}
+
+function roleBoardColorLabel(role) {
+  return role === "host" ? "Brown" : "Blue";
+}
+
+function roomPlayerDisplayName(player) {
+  const customName = normalizePlayerName(player?.name || "");
+  if (customName) return customName;
+  return roomRoleLabel(player?.role);
+}
+
+function applyRoomRoster(players) {
+  if (!Array.isArray(players)) return;
+  const bySide = { player: "", ai: "" };
+  for (const player of normalizeRoomRoster(players)) {
+    const side = player.role === "guest" ? "ai" : "player";
+    bySide[side] = normalizePlayerName(player.name || "");
+  }
+  bySide[state.localSide] = state.localPlayerName;
+  state.playerNames.player = bySide.player;
+  state.playerNames.ai = bySide.ai;
+}
+
+async function fetchAvailableRooms({ silent = false } = {}) {
+  let baseUrl;
+  try {
+    baseUrl = getSignalingBaseUrl();
+  } catch (error) {
+    if (!silent) {
+      state.roomsError = error.message || "Signaling service URL is not configured.";
+      state.roomsLoading = false;
+      render();
+    }
+    return;
+  }
+
+  if (!silent) {
+    state.roomsLoading = true;
+    state.roomsError = "";
+    render();
+  }
+
+  const endpoint = new URL(getRoomsEndpointUrl(baseUrl));
+  endpoint.searchParams.set("t", Date.now().toString(36));
+
+  try {
+    const response = await fetch(endpoint.toString(), {
+      method: "GET",
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to load rooms (${response.status}).`);
+    }
+    const payload = await response.json();
+    if (!Array.isArray(payload?.rooms)) {
+      throw new Error("Signaling service missing /rooms support. Deploy latest cloudflare worker.");
+    }
+    state.availableRooms = normalizeRoomDirectory(payload);
+    state.roomsError = "";
+  } catch (error) {
+    if (!silent) {
+      state.roomsError = error.message || "Failed to load rooms.";
+    }
+  } finally {
+    state.roomsLoading = false;
+    render();
+  }
+}
+
+function startRoomListPolling() {
+  if (roomListPollTimer) return;
+  roomListPollTimer = setInterval(() => {
+    if (!state.networkModalOpen) {
+      stopRoomListPolling();
+      return;
+    }
+    void fetchAvailableRooms({ silent: true });
+  }, 5000);
+}
+
+function stopRoomListPolling() {
+  if (!roomListPollTimer) return;
+  clearInterval(roomListPollTimer);
+  roomListPollTimer = null;
+}
+
+function renderRoomList() {
+  if (!elements.roomList) return;
+  const rooms = Array.isArray(state.availableRooms) ? [...state.availableRooms] : [];
+  const hasCurrentRoomEntry = rooms.some((room) => room.roomId === rtc.roomId);
+  if (state.gameMode === "p2p" && rtc.roomId && !hasCurrentRoomEntry) {
+    const localRole = state.localSide === "player" ? "host" : "guest";
+    const remoteRole = localRole === "host" ? "guest" : "host";
+    const players = [{ role: localRole, name: state.localPlayerName }];
+    const remoteName = normalizePlayerName(state.playerNames[otherSide(state.localSide)] || "");
+    const estimatedPeerCount = Number.isFinite(rtc.peerCount) ? rtc.peerCount : 1;
+    if (estimatedPeerCount > 1 || remoteName) {
+      players.push({ role: remoteRole, name: remoteName });
+    }
+    rooms.unshift({
+      roomId: rtc.roomId,
+      players,
+      playerCount: players.length,
+      openSeat: players.length < 2,
+      openRole: players.some((player) => player.role === "host") ? "guest" : "host",
+      updatedAt: Date.now(),
+    });
+  }
+  elements.roomList.innerHTML = "";
+
+  if (elements.roomsLoading) {
+    elements.roomsLoading.hidden = !state.roomsLoading;
+  }
+
+  if (elements.roomsError) {
+    const hasError = Boolean(state.roomsError);
+    elements.roomsError.hidden = !hasError;
+    elements.roomsError.textContent = hasError ? state.roomsError : "";
+  }
+
+  for (const room of rooms) {
+    const roomCard = document.createElement("li");
+    roomCard.className = "room-list-item";
+    roomCard.dataset.roomId = room.roomId;
+
+    const roomMain = document.createElement("div");
+    roomMain.className = "room-list-main";
+
+    const roomIdLine = document.createElement("p");
+    roomIdLine.className = "room-id-line";
+    const roomIdLabel = document.createElement("strong");
+    roomIdLabel.className = "room-id-code";
+    roomIdLabel.textContent = room.roomId;
+    roomIdLine.append("Room", roomIdLabel);
+    roomMain.appendChild(roomIdLine);
+
+    const playerList = document.createElement("div");
+    playerList.className = "room-player-list";
+    for (const player of room.players) {
+      const tag = document.createElement("span");
+      tag.className = "room-player-tag";
+      tag.textContent = roomPlayerDisplayName(player);
+      playerList.appendChild(tag);
+    }
+    if (room.playerCount < 2) {
+      const openSeatTag = document.createElement("span");
+      openSeatTag.className = "room-player-tag room-open-seat";
+      const openRole = room.openRole === "host" ? "host" : "guest";
+      openSeatTag.textContent = `${roleBoardColorLabel(openRole)} side open`;
+      playerList.appendChild(openSeatTag);
+    }
+    roomMain.appendChild(playerList);
+
+    const stateLine = document.createElement("p");
+    stateLine.className = "room-state-line";
+    stateLine.textContent = `${room.playerCount}/2 players`;
+    roomMain.appendChild(stateLine);
+
+    const isCurrentRoom = state.gameMode === "p2p" && rtc.roomId === room.roomId;
+    if (isCurrentRoom) {
+      const currentTag = document.createElement("span");
+      currentTag.className = "room-current-tag";
+      currentTag.textContent = "Current room";
+      roomMain.appendChild(currentTag);
+    }
+
+    roomCard.appendChild(roomMain);
+
+    if (isCurrentRoom) {
+      const leaveButton = document.createElement("button");
+      leaveButton.type = "button";
+      leaveButton.className = "button-secondary room-list-leave";
+      leaveButton.textContent = "Leave";
+      leaveButton.dataset.leaveCurrentRoom = "1";
+      roomCard.appendChild(leaveButton);
+    } else if (room.openSeat) {
+      const joinButton = document.createElement("button");
+      joinButton.type = "button";
+      joinButton.className = "button-accent room-list-join";
+      joinButton.textContent = "Join";
+      joinButton.dataset.joinRoomId = room.roomId;
+      roomCard.appendChild(joinButton);
+    }
+
+    elements.roomList.appendChild(roomCard);
+  }
+
+  if (elements.roomListEmpty) {
+    const shouldShowEmpty = (
+      !state.roomsLoading
+      && !state.roomsError
+      && rooms.length === 0
+    );
+    elements.roomListEmpty.hidden = !shouldShowEmpty;
+  }
+}
+
+function buildSignalingSocketUrl(baseUrl, roomId, playerName = "") {
   const url = new URL(baseUrl);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   const basePath = url.pathname.replace(/\/+$/, "");
   url.pathname = `${basePath}/ws/${encodeURIComponent(roomId)}`;
+  const normalizedName = normalizePlayerName(playerName);
   url.search = "";
+  if (normalizedName) {
+    url.searchParams.set("name", normalizedName);
+  }
   url.hash = "";
   return url.toString();
 }
@@ -1463,7 +1947,7 @@ function parseRoomInput(rawValue) {
 
   const normalizedCode = normalizeRoomCode(value);
   if (normalizedCode) return normalizedCode;
-  throw new Error("Paste a room code or invite link with ?room=...");
+  throw new Error("Room code is invalid.");
 }
 
 function generateRoomCode() {
@@ -1549,10 +2033,11 @@ function clearPeerSession() {
   rtc.roomId = "";
   rtc.peerCount = 0;
   rtc.generatedSignal = "";
+  state.lastSyncedPayload = "";
 }
 
-function openSignalingSocket(baseUrl, roomId) {
-  const socketUrl = buildSignalingSocketUrl(baseUrl, roomId);
+function openSignalingSocket(baseUrl, roomId, playerName = "") {
+  const socketUrl = buildSignalingSocketUrl(baseUrl, roomId, playerName);
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(socketUrl);
     let settled = false;
@@ -1574,6 +2059,7 @@ function openSignalingSocket(baseUrl, roomId) {
         resolve();
       }
       updateNetworkStatus("Connected to signaling. Waiting for room assignment...");
+      sendPlayerNameToSignaling();
       render();
     };
 
@@ -1595,6 +2081,7 @@ function openSignalingSocket(baseUrl, roomId) {
         state.message = "Disconnected from signaling.";
       }
       updateNetworkStatus();
+      void fetchAvailableRooms({ silent: true });
       render();
     };
   });
@@ -1605,6 +2092,28 @@ function sendSignalPayload(payload) {
     return false;
   }
   rtc.signalingSocket.send(JSON.stringify({ type: "signal", payload }));
+  return true;
+}
+
+function sendRoomStateToSignaling(payload) {
+  if (!rtc.signalingSocket || rtc.signalingSocket.readyState !== WebSocket.OPEN) {
+    return false;
+  }
+  rtc.signalingSocket.send(JSON.stringify({
+    type: "room-state",
+    payload,
+  }));
+  return true;
+}
+
+function sendPlayerNameToSignaling() {
+  if (!rtc.signalingSocket || rtc.signalingSocket.readyState !== WebSocket.OPEN) {
+    return false;
+  }
+  rtc.signalingSocket.send(JSON.stringify({
+    type: "set-name",
+    name: state.localPlayerName,
+  }));
   return true;
 }
 
@@ -1621,10 +2130,31 @@ function applyRemoteGameState(payload) {
   state.awaitingRoll = payload.awaitingRoll;
   state.openingRollPending = payload.openingRollPending === true;
   state.showNoMoveDice = payload.showNoMoveDice === true;
+  state.gameOver = payload.gameOver === true;
+  state.winnerSide = payload.winnerSide === "ai" || payload.winnerSide === "player"
+    ? payload.winnerSide
+    : "";
+  state.resignedBySide = payload.resignedBySide === "ai" || payload.resignedBySide === "player"
+    ? payload.resignedBySide
+    : "";
+  if (state.gameOver) {
+    state.autoDiceEnabled = false;
+    closeResignModal({ renderAfter: false });
+  }
   const senderSide = payload.senderSide === "ai" ? "ai" : "player";
   const senderName = normalizePlayerName(payload.senderName || "");
   state.playerNames[senderSide] = senderName;
-  state.message = payload.message || state.message;
+  if (state.gameOver && state.resignedBySide) {
+    const resignedName = normalizePlayerName(state.playerNames[state.resignedBySide] || "");
+    const resignedLabel = resignedName
+      ? `Player (${resignedName})`
+      : sideLabel(state.resignedBySide);
+    state.message = state.resignedBySide === state.localSide
+      ? `You resigned. ${capitalizeSide(otherSide(state.resignedBySide))} wins! Press New Game to play again.`
+      : `${resignedLabel} resigned. ${capitalizeSide(otherSide(state.resignedBySide))} wins! Press New Game to play again.`;
+  } else {
+    state.message = payload.message || state.message;
+  }
   state.selectedFrom = null;
   state.lastMoveSnapshot = null;
   state.aiMoveHighlights = { from: [], to: [] };
@@ -1645,6 +2175,9 @@ function buildSyncPayload() {
     awaitingRoll: state.awaitingRoll,
     openingRollPending: state.openingRollPending,
     showNoMoveDice: state.showNoMoveDice === true,
+    gameOver: state.gameOver === true,
+    winnerSide: state.winnerSide,
+    resignedBySide: state.resignedBySide,
     senderSide: state.localSide,
     senderName: state.localPlayerName,
     message: state.message,
@@ -1654,13 +2187,21 @@ function buildSyncPayload() {
 function syncGameStateToPeer(force = false) {
   if (state.gameMode !== "p2p") return;
   if (state.remoteSyncInProgress) return;
-  if (!rtc.connected || !rtc.channel || rtc.channel.readyState !== "open") return;
 
   const payload = buildSyncPayload();
   const encoded = JSON.stringify(payload);
   if (!force && encoded === state.lastSyncedPayload) return;
-  state.lastSyncedPayload = encoded;
-  rtc.channel.send(JSON.stringify({ type: "state-sync", payload }));
+  let sent = false;
+  if (rtc.connected && rtc.channel && rtc.channel.readyState === "open") {
+    rtc.channel.send(JSON.stringify({ type: "state-sync", payload }));
+    sent = true;
+  }
+  if (sendRoomStateToSignaling(payload)) {
+    sent = true;
+  }
+  if (sent) {
+    state.lastSyncedPayload = encoded;
+  }
 }
 
 function attachDataChannel(channel) {
@@ -1687,6 +2228,10 @@ function attachDataChannel(channel) {
       const message = JSON.parse(event.data);
       if (message.type === "state-sync") {
         applyRemoteGameState(message.payload);
+        return;
+      }
+      if (message.type === "resign") {
+        handleRemoteResignNotice(message);
       }
     } catch (error) {
       state.message = "Received invalid peer message.";
@@ -1817,6 +2362,10 @@ async function handleIncomingSignal(payload) {
   }
   if (payload.kind === "ice-candidate") {
     await handleIceCandidateSignal(payload.candidate);
+    return;
+  }
+  if (payload.kind === "resign") {
+    handleRemoteResignNotice(payload);
   }
 }
 
@@ -1835,10 +2384,13 @@ async function handleSignalingMessage(rawData) {
     rtc.peerCount = Number.isInteger(message.peerCount) ? message.peerCount : rtc.peerCount;
     rtc.role = message.role === "host" ? "host" : "guest";
     state.localSide = rtc.role === "host" ? "player" : "ai";
-    state.playerNames[state.localSide] = state.localPlayerName;
+    applyRoomRoster(message.players);
+    if (message.roomState && typeof message.roomState === "object") {
+      applyRemoteGameState(message.roomState);
+    }
     if (rtc.role === "host") {
       ensureHostPeerConnection();
-      state.message = `Room ${rtc.roomId} ready. Share the room link with ${sideLabel("ai")}.`;
+      state.message = `Room ${rtc.roomId} created. Waiting for ${sideLabel("ai")}.`;
       if (rtc.peerCount > 1) {
         await startHostNegotiation();
       }
@@ -1846,7 +2398,9 @@ async function handleSignalingMessage(rawData) {
       ensureGuestPeerConnection();
       state.message = `Joined room ${rtc.roomId} as ${sideLabel("ai")}. Waiting for ${sideLabel("player")}...`;
     }
+    syncGameStateToPeer(true);
     updateNetworkStatus();
+    void fetchAvailableRooms({ silent: true });
     render();
     return;
   }
@@ -1864,6 +2418,9 @@ async function handleSignalingMessage(rawData) {
       updateNetworkStatus();
       render();
     }
+    applyRoomRoster(message.players);
+    void fetchAvailableRooms({ silent: true });
+    render();
     return;
   }
 
@@ -1876,9 +2433,25 @@ async function handleSignalingMessage(rawData) {
     if (rtc.role === "host") {
       ensureHostPeerConnection();
     }
+    applyRoomRoster(message.players);
     state.message = "Peer left the room.";
     updateNetworkStatus();
+    void fetchAvailableRooms({ silent: true });
     render();
+    return;
+  }
+
+  if (message.type === "peer-name") {
+    const remoteSide = message.role === "guest" ? "ai" : "player";
+    state.playerNames[remoteSide] = normalizePlayerName(message.name || "");
+    state.playerNames[state.localSide] = state.localPlayerName;
+    void fetchAvailableRooms({ silent: true });
+    render();
+    return;
+  }
+
+  if (message.type === "name-updated") {
+    void fetchAvailableRooms({ silent: true });
     return;
   }
 
@@ -1896,7 +2469,7 @@ async function handleSignalingMessage(rawData) {
 async function connectToRoom(roomValue) {
   const roomId = parseRoomInput(roomValue);
   if (!roomId) {
-    throw new Error("Paste a room code or invite link first.");
+    throw new Error("Room id is invalid.");
   }
 
   const signalingBaseUrl = getSignalingBaseUrl();
@@ -1906,12 +2479,6 @@ async function connectToRoom(roomValue) {
   state.playerNames[state.localSide] = state.localPlayerName;
   rtc.roomId = roomId;
   rtc.generatedSignal = buildRoomInviteUrl(roomId);
-  if (elements.signalInput) {
-    elements.signalInput.value = roomId;
-  }
-  if (elements.signalOutput) {
-    elements.signalOutput.value = rtc.generatedSignal;
-  }
   setRoomQueryParam(roomId);
 
   state.message = `Connecting to room ${roomId}...`;
@@ -1919,7 +2486,8 @@ async function connectToRoom(roomValue) {
   render();
 
   try {
-    await openSignalingSocket(signalingBaseUrl, roomId);
+    await openSignalingSocket(signalingBaseUrl, roomId, state.localPlayerName);
+    void fetchAvailableRooms({ silent: true });
   } catch (error) {
     clearPeerSession();
     state.gameMode = "ai";
@@ -1936,6 +2504,7 @@ async function createRoomAndConnect() {
 }
 
 function disconnectPeerSession() {
+  const previousRoomId = rtc.roomId;
   clearPeerSession();
   rtc.roomId = "";
   state.gameMode = "ai";
@@ -1944,85 +2513,17 @@ function disconnectPeerSession() {
   state.playerNames.player = state.localPlayerName;
   state.message = "Left room. Back to vs computer.";
   setRoomQueryParam("");
-  if (elements.signalOutput) {
-    elements.signalOutput.value = "";
-  }
   closeConnectionModal({ renderAfter: false });
+  closeResignModal({ renderAfter: false });
   updateNetworkStatus("Disconnected.");
-  render();
-}
-
-async function copySignalOutput(successMessage) {
-  const code = elements.signalOutput?.value.trim() || "";
-  if (!code) {
-    state.message = "No link to copy yet.";
-    render();
-    return false;
-  }
-  try {
-    await writeClipboardText(code);
-    state.message = successMessage || "Link copied.";
-  } catch (error) {
-    state.message = "Clipboard copy failed. Copy manually.";
+  if (previousRoomId) {
+    void fetchAvailableRooms({ silent: true });
   }
   render();
-  return true;
 }
 
-async function writeClipboardText(value) {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(value);
-    return;
-  }
-  const fallback = document.createElement("textarea");
-  fallback.value = value;
-  fallback.setAttribute("readonly", "");
-  fallback.style.position = "fixed";
-  fallback.style.opacity = "0";
-  fallback.style.pointerEvents = "none";
-  document.body.appendChild(fallback);
-  fallback.focus();
-  fallback.select();
-  const didCopy = document.execCommand("copy");
-  document.body.removeChild(fallback);
-  if (!didCopy) {
-    throw new Error("Clipboard copy is unavailable.");
-  }
-}
-
-async function readClipboardText() {
-  if (!navigator.clipboard?.readText) {
-    throw new Error("Clipboard paste is unavailable in this browser.");
-  }
-  return navigator.clipboard.readText();
-}
-
-async function pasteSignalInputFromClipboard() {
-  if (!elements.signalInput) return false;
-  const text = (await readClipboardText()).trim();
-  if (!text) {
-    throw new Error("Clipboard is empty.");
-  }
-  elements.signalInput.value = text;
-  return true;
-}
-
-async function handleJoinLink() {
+async function handleJoinRoom(roomId) {
   try {
-    if (!(elements.signalInput?.value.trim() || "")) {
-      try {
-        await pasteSignalInputFromClipboard();
-      } catch (error) {
-        // Ignore clipboard read failures and keep manual input flow.
-      }
-    }
-    const inputValue = elements.signalInput?.value || "";
-    const roomId = parseRoomInput(inputValue);
-    if (!roomId) {
-      state.message = "Paste a room code or invite link first.";
-      render();
-      return;
-    }
     await connectToRoom(roomId);
   } catch (error) {
     state.message = error.message || "Failed to join room.";
@@ -2036,9 +2537,6 @@ async function prefillSignalFromQuery() {
   if (!room) return;
 
   state.gameMode = "p2p";
-  if (elements.signalInput) {
-    elements.signalInput.value = room;
-  }
   state.message = `Room ${room} detected. Connecting...`;
   render();
   try {
@@ -2052,6 +2550,13 @@ async function prefillSignalFromQuery() {
 function handleKeyboardShortcut(event) {
   if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
   const key = event.key.toLowerCase();
+  if (state.resignModalOpen) {
+    if (key === "escape") {
+      event.preventDefault();
+      closeResignModal();
+    }
+    return;
+  }
   if (state.networkModalOpen) {
     if (key === "escape") {
       event.preventDefault();
@@ -2083,12 +2588,7 @@ function handleKeyboardShortcut(event) {
   }
   if (key === "n") {
     event.preventDefault();
-    if (state.gameMode === "p2p" && state.localSide !== "player") {
-      state.message = "Only host can start a new network game.";
-      render();
-      return;
-    }
-    initBoard();
+    handlePrimaryGameAction();
     return;
   }
   if (key === "e") {
@@ -2112,25 +2612,10 @@ function handleKeyboardShortcut(event) {
     handleBearOff();
     return;
   }
-  if (key === "s") {
-    event.preventDefault();
-    saveStateToStorage();
-    state.message = "Game saved.";
-    render();
-    return;
-  }
-  if (key === "l") {
-    event.preventDefault();
-    loadStateFromStorage();
-  }
 }
 
 function setupListeners() {
   elements.roomAction?.addEventListener("click", () => {
-    if (state.gameMode === "p2p") {
-      disconnectPeerSession();
-      return;
-    }
     openConnectionModal();
   });
   elements.autoDiceToggle?.addEventListener("click", () => {
@@ -2166,6 +2651,20 @@ function setupListeners() {
       closeConnectionModal();
     }
   });
+  elements.resignModalClose?.addEventListener("click", () => {
+    closeResignModal();
+  });
+  elements.resignCancel?.addEventListener("click", () => {
+    closeResignModal();
+  });
+  elements.resignConfirm?.addEventListener("click", () => {
+    confirmResign();
+  });
+  elements.resignModal?.addEventListener("click", (event) => {
+    if (event.target === elements.resignModal) {
+      closeResignModal();
+    }
+  });
 
   elements.board.addEventListener("click", handleBoardClick);
   elements.dice.addEventListener("click", () => {
@@ -2179,12 +2678,7 @@ function setupListeners() {
     rollForTurn();
   });
   elements.newGame.addEventListener("click", () => {
-    if (state.gameMode === "p2p" && state.localSide !== "player") {
-      state.message = "Only host can start a new network game.";
-      render();
-      return;
-    }
-    initBoard();
+    handlePrimaryGameAction();
   });
   elements.bearOff.addEventListener("click", handleBearOff);
   elements.endTurn.addEventListener("click", () => {
@@ -2198,27 +2692,35 @@ function setupListeners() {
     render();
     syncGameStateToPeer();
   });
-  elements.save.addEventListener("click", () => {
-    saveStateToStorage();
-    state.message = "Game saved.";
-    render();
-  });
-  elements.load.addEventListener("click", loadStateFromStorage);
-  elements.copyInvite.addEventListener("click", async () => {
+  elements.createRoom?.addEventListener("click", async () => {
+    if (state.gameMode === "p2p" && rtc.roomId) {
+      state.message = "Leave your current room before creating a new one.";
+      render();
+      return;
+    }
     try {
       await createRoomAndConnect();
-      await copySignalOutput(`Room link copied. Send it to ${sideLabel("ai")}.`);
+      void fetchAvailableRooms({ silent: true });
     } catch (error) {
       state.message = error.message || "Failed to create room.";
       render();
     }
   });
-  elements.joinLink.addEventListener("click", handleJoinLink);
-  elements.signalInput?.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !event.shiftKey) {
-      event.preventDefault();
-      void handleJoinLink();
+  elements.refreshRooms?.addEventListener("click", () => {
+    void fetchAvailableRooms();
+  });
+  elements.roomList?.addEventListener("click", (event) => {
+    if (!(event.target instanceof Element)) return;
+    const leaveButton = event.target.closest("button[data-leave-current-room]");
+    if (leaveButton instanceof HTMLButtonElement) {
+      disconnectPeerSession();
+      return;
     }
+    const joinButton = event.target.closest("button[data-join-room-id]");
+    if (!(joinButton instanceof HTMLButtonElement)) return;
+    const roomId = joinButton.dataset.joinRoomId || "";
+    if (!roomId) return;
+    void handleJoinRoom(roomId);
   });
   window.addEventListener("resize", () => {
     updateCheckerSize();
