@@ -4,7 +4,7 @@ const STORAGE_KEY = "bg-save";
 const PROFILE_STORAGE_KEY = "bg-profile";
 const AI_MOVE_TOTAL_MS = 3000;
 const AI_MOVE_MIN_STEP_MS = 450;
-const COMMIT_VERSION = "V2026-02-09-6";
+const COMMIT_VERSION = "V2026-02-09-7";
 const SIGNALING_BASE_URL = "https://bg-rendezvous.hilbert.workers.dev";
 const RTC_CONFIG = {
   iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
@@ -36,6 +36,8 @@ const state = {
   playerNames: { player: "", ai: "" },
   nameClaimCandidate: "",
   nameUpdatePending: false,
+  nameStatusMessage: "",
+  nameStatusIsError: false,
   networkModalOpen: false,
   remoteSyncInProgress: false,
   lastSyncedPayload: "",
@@ -91,6 +93,7 @@ const elements = {
   playerNameInput: document.getElementById("player-name-input"),
   updatePlayerName: document.getElementById("update-player-name"),
   claimPlayerName: document.getElementById("claim-player-name"),
+  nameStatus: document.getElementById("name-status"),
   networkStatus: document.getElementById("network-status"),
   createRoom: document.getElementById("create-room"),
   refreshRooms: document.getElementById("refresh-rooms"),
@@ -198,6 +201,7 @@ function setLocalPlayerName(rawValue, { announce = false, sync = true } = {}) {
 
   if (!changed) return;
   clearNameClaimCandidate();
+  setNameStatus("");
 
   if (announce) {
     state.message = normalized
@@ -759,7 +763,10 @@ function render() {
     const localRole = sideRoleName(state.localSide);
     elements.playerNameInput.placeholder = `Your name (${localRole})`;
     if (document.activeElement !== elements.playerNameInput) {
-      elements.playerNameInput.value = state.localPlayerName;
+      const displayName = state.nameClaimCandidate || state.localPlayerName;
+      if (elements.playerNameInput.value !== displayName) {
+        elements.playerNameInput.value = displayName;
+      }
     }
   }
   if (elements.updatePlayerName && elements.playerNameInput) {
@@ -772,6 +779,12 @@ function render() {
       && state.nameClaimCandidate.toLowerCase() === pendingName.toLowerCase();
     elements.claimPlayerName.hidden = !showClaim;
     elements.claimPlayerName.disabled = state.nameUpdatePending || !showClaim;
+  }
+  if (elements.nameStatus) {
+    const hasStatus = Boolean(state.nameStatusMessage);
+    elements.nameStatus.hidden = !hasStatus;
+    elements.nameStatus.textContent = hasStatus ? state.nameStatusMessage : "";
+    elements.nameStatus.classList.toggle("error", hasStatus && state.nameStatusIsError);
   }
   if (elements.refreshRooms) {
     elements.refreshRooms.disabled = state.roomsLoading;
@@ -1710,6 +1723,11 @@ function clearNameClaimCandidate() {
   state.nameClaimCandidate = "";
 }
 
+function setNameStatus(message = "", { isError = false } = {}) {
+  state.nameStatusMessage = String(message || "");
+  state.nameStatusIsError = isError === true;
+}
+
 async function reservePlayerName(playerName, { claim = false } = {}) {
   const normalizedName = normalizePlayerName(playerName);
   if (!normalizedName) {
@@ -1772,10 +1790,11 @@ async function submitPlayerNameUpdate({ claim = false, announce = true } = {}) {
   if (state.nameUpdatePending) return;
   const nextName = normalizePlayerName(elements.playerNameInput?.value || "");
   const previousName = state.localPlayerName;
+  setNameStatus("");
 
   if (!claim && nextName === previousName) {
     if (announce && nextName) {
-      state.message = `Player name unchanged (${nextName}).`;
+      setNameStatus(`Current name: ${nextName}.`);
       render();
     }
     return;
@@ -1790,6 +1809,7 @@ async function submitPlayerNameUpdate({ claim = false, announce = true } = {}) {
         await releasePlayerName(previousName);
       }
       clearNameClaimCandidate();
+      setNameStatus("");
       setLocalPlayerName("", { announce, sync: true });
       return;
     }
@@ -1798,7 +1818,10 @@ async function submitPlayerNameUpdate({ claim = false, announce = true } = {}) {
     if (!reservation.ok) {
       const conflictingName = normalizePlayerName(reservation.name || nextName);
       state.nameClaimCandidate = conflictingName;
-      state.message = `Name "${conflictingName}" is already taken. Click Claim My Name to take it over.`;
+      if (elements.playerNameInput) {
+        elements.playerNameInput.value = conflictingName;
+      }
+      setNameStatus("Name is already taken. Click Claim My Name to take it over.", { isError: true });
       render();
       return;
     }
@@ -1817,10 +1840,12 @@ async function submitPlayerNameUpdate({ claim = false, announce = true } = {}) {
       void fetchAvailableRooms({ silent: true });
     }
     if (reservation.claimed) {
+      setNameStatus(`You claimed "${reservedName}".`);
       state.message = `You claimed the name ${reservedName}.`;
       render();
     }
   } catch (error) {
+    setNameStatus(error?.message || "Failed to update player name.", { isError: true });
     state.message = error?.message || "Failed to update player name.";
     render();
   } finally {
@@ -2667,7 +2692,10 @@ async function handleSignalingMessage(rawData) {
     saveProfileToStorage();
     clearNameClaimCandidate();
     if (message.claimed) {
+      setNameStatus(`You claimed "${confirmedName}".`);
       state.message = `You claimed the name ${confirmedName}.`;
+    } else {
+      setNameStatus("");
     }
     void fetchAvailableRooms({ silent: true });
     render();
@@ -2680,8 +2708,13 @@ async function handleSignalingMessage(rawData) {
     );
     if (requestedName) {
       state.nameClaimCandidate = requestedName;
+      if (elements.playerNameInput) {
+        elements.playerNameInput.value = requestedName;
+      }
+      setNameStatus("Name is already taken. Click Claim My Name to take it over.", { isError: true });
       state.message = `Name "${requestedName}" is already taken. Click Claim My Name to take it over.`;
     } else {
+      setNameStatus("Name is already taken. Choose another name.", { isError: true });
       state.message = "Name is already taken. Choose another name.";
     }
     render();
@@ -2711,6 +2744,10 @@ async function connectToRoom(roomValue) {
     if (!reservation.ok) {
       const conflictingName = normalizePlayerName(reservation.name || state.localPlayerName);
       state.nameClaimCandidate = conflictingName;
+      if (elements.playerNameInput) {
+        elements.playerNameInput.value = conflictingName;
+      }
+      setNameStatus("Name is already taken. Click Claim My Name to take it over.", { isError: true });
       throw new Error(`Name "${conflictingName}" is already taken. Use Claim My Name first.`);
     }
   }
@@ -2887,6 +2924,7 @@ function setupListeners() {
       && state.nameClaimCandidate.toLowerCase() !== pendingName.toLowerCase()
     ) {
       clearNameClaimCandidate();
+      setNameStatus("");
     }
     elements.updatePlayerName.disabled =
       state.nameUpdatePending || pendingName === state.localPlayerName;
