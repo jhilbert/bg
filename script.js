@@ -1,9 +1,10 @@
 const POINTS = 24;
 const TOTAL_CHECKERS = 15;
 const STORAGE_KEY = "bg-save";
+const PROFILE_STORAGE_KEY = "bg-profile";
 const AI_MOVE_TOTAL_MS = 3000;
 const AI_MOVE_MIN_STEP_MS = 450;
-const COMMIT_VERSION = "V2026-02-09-4";
+const COMMIT_VERSION = "V2026-02-09-6";
 const SIGNALING_BASE_URL = "https://bg-rendezvous.hilbert.workers.dev";
 const RTC_CONFIG = {
   iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
@@ -31,7 +32,10 @@ const state = {
   autoDiceEnabled: false,
   showNoMoveDice: false,
   localPlayerName: "",
+  localClientId: "",
   playerNames: { player: "", ai: "" },
+  nameClaimCandidate: "",
+  nameUpdatePending: false,
   networkModalOpen: false,
   remoteSyncInProgress: false,
   lastSyncedPayload: "",
@@ -86,6 +90,7 @@ const elements = {
   autoDiceToggle: document.getElementById("auto-dice-toggle"),
   playerNameInput: document.getElementById("player-name-input"),
   updatePlayerName: document.getElementById("update-player-name"),
+  claimPlayerName: document.getElementById("claim-player-name"),
   networkStatus: document.getElementById("network-status"),
   createRoom: document.getElementById("create-room"),
   refreshRooms: document.getElementById("refresh-rooms"),
@@ -113,6 +118,60 @@ function normalizePlayerName(rawValue) {
     .slice(0, 22);
 }
 
+function normalizeClientId(rawValue) {
+  return String(rawValue || "")
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9_-]/g, "")
+    .slice(0, 64);
+}
+
+function createLocalClientId() {
+  if (window.crypto?.randomUUID) {
+    return normalizeClientId(window.crypto.randomUUID());
+  }
+  if (window.crypto?.getRandomValues) {
+    const bytes = new Uint8Array(16);
+    window.crypto.getRandomValues(bytes);
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function saveProfileToStorage() {
+  const payload = {
+    localPlayerName: state.localPlayerName,
+    localClientId: state.localClientId,
+  };
+  localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(payload));
+}
+
+function loadProfileFromStorage() {
+  const raw = localStorage.getItem(PROFILE_STORAGE_KEY);
+  if (raw) {
+    try {
+      const payload = JSON.parse(raw);
+      state.localPlayerName = normalizePlayerName(payload?.localPlayerName || "");
+      state.localClientId = normalizeClientId(payload?.localClientId || "");
+    } catch {
+      state.localPlayerName = "";
+      state.localClientId = "";
+    }
+  }
+  if (!state.localClientId) {
+    state.localClientId = createLocalClientId();
+  }
+  state.playerNames[state.localSide] = state.localPlayerName;
+  saveProfileToStorage();
+}
+
+function ensureLocalClientId() {
+  if (state.localClientId) return state.localClientId;
+  state.localClientId = createLocalClientId();
+  saveProfileToStorage();
+  return state.localClientId;
+}
+
 function sideRoleName(side) {
   return side === "player" ? "Host" : "Guest";
 }
@@ -135,8 +194,10 @@ function setLocalPlayerName(rawValue, { announce = false, sync = true } = {}) {
 
   state.localPlayerName = normalized;
   state.playerNames[side] = normalized;
+  saveProfileToStorage();
 
   if (!changed) return;
+  clearNameClaimCandidate();
 
   if (announce) {
     state.message = normalized
@@ -703,7 +764,14 @@ function render() {
   }
   if (elements.updatePlayerName && elements.playerNameInput) {
     const pendingName = normalizePlayerName(elements.playerNameInput.value);
-    elements.updatePlayerName.disabled = pendingName === state.localPlayerName;
+    elements.updatePlayerName.disabled = state.nameUpdatePending || pendingName === state.localPlayerName;
+  }
+  if (elements.claimPlayerName && elements.playerNameInput) {
+    const pendingName = normalizePlayerName(elements.playerNameInput.value);
+    const showClaim = Boolean(state.nameClaimCandidate)
+      && state.nameClaimCandidate.toLowerCase() === pendingName.toLowerCase();
+    elements.claimPlayerName.hidden = !showClaim;
+    elements.claimPlayerName.disabled = state.nameUpdatePending || !showClaim;
   }
   if (elements.refreshRooms) {
     elements.refreshRooms.disabled = state.roomsLoading;
@@ -1629,6 +1697,138 @@ function getRoomsEndpointUrl(baseUrl) {
   return url.toString();
 }
 
+function getNameEndpointUrl(baseUrl, playerName) {
+  const url = new URL(baseUrl);
+  const basePath = url.pathname.replace(/\/+$/, "");
+  url.pathname = `${basePath}/names/${encodeURIComponent(playerName)}`;
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
+
+function clearNameClaimCandidate() {
+  state.nameClaimCandidate = "";
+}
+
+async function reservePlayerName(playerName, { claim = false } = {}) {
+  const normalizedName = normalizePlayerName(playerName);
+  if (!normalizedName) {
+    return { ok: true, name: "", claimed: false };
+  }
+  const baseUrl = getSignalingBaseUrl();
+  const endpoint = getNameEndpointUrl(baseUrl, normalizedName);
+  const response = await fetch(endpoint, {
+    method: "PUT",
+    headers: { "content-type": "application/json; charset=utf-8" },
+    body: JSON.stringify({
+      clientId: ensureLocalClientId(),
+      roomId: rtc.roomId,
+      claim: claim === true,
+    }),
+    cache: "no-store",
+  });
+  let payload = {};
+  try {
+    payload = await response.json();
+  } catch {
+    payload = {};
+  }
+  if (response.status === 409) {
+    return {
+      ok: false,
+      reason: payload?.reason || "taken",
+      name: normalizePlayerName(payload?.name || normalizedName),
+    };
+  }
+  if (!response.ok) {
+    const message = typeof payload?.error === "string"
+      ? payload.error
+      : `Could not update name (${response.status}).`;
+    throw new Error(message);
+  }
+  return {
+    ok: true,
+    name: normalizePlayerName(payload?.name || normalizedName),
+    claimed: payload?.claimed === true,
+  };
+}
+
+async function releasePlayerName(playerName) {
+  const normalizedName = normalizePlayerName(playerName);
+  if (!normalizedName) return;
+  const baseUrl = getSignalingBaseUrl();
+  const endpoint = new URL(getNameEndpointUrl(baseUrl, normalizedName));
+  endpoint.searchParams.set("client", ensureLocalClientId());
+  const response = await fetch(endpoint.toString(), {
+    method: "DELETE",
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(`Could not release name (${response.status}).`);
+  }
+}
+
+async function submitPlayerNameUpdate({ claim = false, announce = true } = {}) {
+  if (state.nameUpdatePending) return;
+  const nextName = normalizePlayerName(elements.playerNameInput?.value || "");
+  const previousName = state.localPlayerName;
+
+  if (!claim && nextName === previousName) {
+    if (announce && nextName) {
+      state.message = `Player name unchanged (${nextName}).`;
+      render();
+    }
+    return;
+  }
+
+  state.nameUpdatePending = true;
+  render();
+
+  try {
+    if (!nextName) {
+      if (previousName) {
+        await releasePlayerName(previousName);
+      }
+      clearNameClaimCandidate();
+      setLocalPlayerName("", { announce, sync: true });
+      return;
+    }
+
+    const reservation = await reservePlayerName(nextName, { claim });
+    if (!reservation.ok) {
+      const conflictingName = normalizePlayerName(reservation.name || nextName);
+      state.nameClaimCandidate = conflictingName;
+      state.message = `Name "${conflictingName}" is already taken. Click Claim My Name to take it over.`;
+      render();
+      return;
+    }
+
+    const reservedName = normalizePlayerName(reservation.name || nextName);
+    if (
+      previousName
+      && previousName.toLowerCase() !== reservedName.toLowerCase()
+    ) {
+      await releasePlayerName(previousName);
+    }
+    clearNameClaimCandidate();
+    setLocalPlayerName(reservedName, { announce, sync: true });
+    if (claim && state.gameMode === "p2p") {
+      sendPlayerNameToSignaling({ name: reservedName, claim: true });
+      void fetchAvailableRooms({ silent: true });
+    }
+    if (reservation.claimed) {
+      state.message = `You claimed the name ${reservedName}.`;
+      render();
+    }
+  } catch (error) {
+    state.message = error?.message || "Failed to update player name.";
+    render();
+  } finally {
+    state.nameUpdatePending = false;
+    render();
+  }
+}
+
 function normalizeRoomRoster(players) {
   if (!Array.isArray(players)) return [];
   const seenRoles = new Set();
@@ -1885,15 +2085,19 @@ function renderRoomList() {
   }
 }
 
-function buildSignalingSocketUrl(baseUrl, roomId, playerName = "") {
+function buildSignalingSocketUrl(baseUrl, roomId, playerName = "", clientId = "") {
   const url = new URL(baseUrl);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   const basePath = url.pathname.replace(/\/+$/, "");
   url.pathname = `${basePath}/ws/${encodeURIComponent(roomId)}`;
   const normalizedName = normalizePlayerName(playerName);
+  const normalizedClientId = normalizeClientId(clientId);
   url.search = "";
   if (normalizedName) {
     url.searchParams.set("name", normalizedName);
+  }
+  if (normalizedClientId) {
+    url.searchParams.set("client", normalizedClientId);
   }
   url.hash = "";
   return url.toString();
@@ -2037,7 +2241,12 @@ function clearPeerSession() {
 }
 
 function openSignalingSocket(baseUrl, roomId, playerName = "") {
-  const socketUrl = buildSignalingSocketUrl(baseUrl, roomId, playerName);
+  const socketUrl = buildSignalingSocketUrl(
+    baseUrl,
+    roomId,
+    playerName,
+    ensureLocalClientId(),
+  );
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(socketUrl);
     let settled = false;
@@ -2106,13 +2315,14 @@ function sendRoomStateToSignaling(payload) {
   return true;
 }
 
-function sendPlayerNameToSignaling() {
+function sendPlayerNameToSignaling({ name = state.localPlayerName, claim = false } = {}) {
   if (!rtc.signalingSocket || rtc.signalingSocket.readyState !== WebSocket.OPEN) {
     return false;
   }
   rtc.signalingSocket.send(JSON.stringify({
     type: "set-name",
-    name: state.localPlayerName,
+    name: normalizePlayerName(name),
+    claim: claim === true,
   }));
   return true;
 }
@@ -2451,7 +2661,30 @@ async function handleSignalingMessage(rawData) {
   }
 
   if (message.type === "name-updated") {
+    const confirmedName = normalizePlayerName(message.name || state.localPlayerName);
+    state.localPlayerName = confirmedName;
+    state.playerNames[state.localSide] = confirmedName;
+    saveProfileToStorage();
+    clearNameClaimCandidate();
+    if (message.claimed) {
+      state.message = `You claimed the name ${confirmedName}.`;
+    }
     void fetchAvailableRooms({ silent: true });
+    render();
+    return;
+  }
+
+  if (message.type === "name-conflict") {
+    const requestedName = normalizePlayerName(
+      message.requestedName || elements.playerNameInput?.value || "",
+    );
+    if (requestedName) {
+      state.nameClaimCandidate = requestedName;
+      state.message = `Name "${requestedName}" is already taken. Click Claim My Name to take it over.`;
+    } else {
+      state.message = "Name is already taken. Choose another name.";
+    }
+    render();
     return;
   }
 
@@ -2473,6 +2706,14 @@ async function connectToRoom(roomValue) {
   }
 
   const signalingBaseUrl = getSignalingBaseUrl();
+  if (state.localPlayerName) {
+    const reservation = await reservePlayerName(state.localPlayerName, { claim: false });
+    if (!reservation.ok) {
+      const conflictingName = normalizePlayerName(reservation.name || state.localPlayerName);
+      state.nameClaimCandidate = conflictingName;
+      throw new Error(`Name "${conflictingName}" is already taken. Use Claim My Name first.`);
+    }
+  }
 
   clearPeerSession();
   state.gameMode = "p2p";
@@ -2627,21 +2868,34 @@ function setupListeners() {
     render();
   });
   elements.updatePlayerName?.addEventListener("click", () => {
-    setLocalPlayerName(elements.playerNameInput?.value || "", { announce: true });
+    void submitPlayerNameUpdate({ claim: false, announce: true });
+  });
+  elements.claimPlayerName?.addEventListener("click", () => {
+    void submitPlayerNameUpdate({ claim: true, announce: true });
   });
   elements.playerNameInput?.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();
-      setLocalPlayerName(elements.playerNameInput?.value || "", { announce: true });
+      void submitPlayerNameUpdate({ claim: false, announce: true });
     }
   });
   elements.playerNameInput?.addEventListener("input", () => {
-    if (!elements.updatePlayerName) return;
+    if (!elements.updatePlayerName || !elements.playerNameInput) return;
     const pendingName = normalizePlayerName(elements.playerNameInput?.value || "");
-    elements.updatePlayerName.disabled = pendingName === state.localPlayerName;
-  });
-  elements.playerNameInput?.addEventListener("blur", () => {
-    setLocalPlayerName(elements.playerNameInput?.value || "", { announce: false });
+    if (
+      state.nameClaimCandidate
+      && state.nameClaimCandidate.toLowerCase() !== pendingName.toLowerCase()
+    ) {
+      clearNameClaimCandidate();
+    }
+    elements.updatePlayerName.disabled =
+      state.nameUpdatePending || pendingName === state.localPlayerName;
+    if (elements.claimPlayerName) {
+      elements.claimPlayerName.hidden = !state.nameClaimCandidate
+        || state.nameClaimCandidate.toLowerCase() !== pendingName.toLowerCase();
+      elements.claimPlayerName.disabled = state.nameUpdatePending || elements.claimPlayerName.hidden;
+    }
+    render();
   });
   elements.roomModalClose?.addEventListener("click", () => {
     closeConnectionModal();
@@ -2729,6 +2983,7 @@ function setupListeners() {
   document.addEventListener("keydown", handleKeyboardShortcut);
 }
 
+loadProfileFromStorage();
 setupListeners();
 initBoard();
 void prefillSignalFromQuery();

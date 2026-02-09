@@ -1,6 +1,11 @@
 const ROOM_PREFIX = "room:";
-const ROOM_STALE_AFTER_MS = 1000 * 60 * 60 * 6;
+const NAME_PREFIX = "name:";
+const ROOM_STALE_AFTER_MS = 1000 * 60 * 60 * 24;
+const NAME_STALE_AFTER_MS = 1000 * 60 * 60 * 24;
+const ROOM_EMPTY_CLEANUP_AFTER_MS = 1000 * 60 * 60 * 24;
 const ROOM_STATE_KEY = "room_state";
+const ROOM_EMPTY_AT_KEY = "room_empty_at";
+const ROOM_ID_KEY = "room_id";
 
 function corsHeaders() {
   return {
@@ -35,6 +40,19 @@ function normalizePlayerName(value) {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 22);
+}
+
+function normalizeClientId(value) {
+  return String(value || "")
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9_-]/g, "")
+    .slice(0, 64);
+}
+
+function normalizeNameKey(value) {
+  const name = normalizePlayerName(value);
+  return name ? name.toLowerCase() : "";
 }
 
 function normalizeRole(role) {
@@ -108,6 +126,116 @@ export class RoomDirectory {
     return `${ROOM_PREFIX}${roomId}`;
   }
 
+  toNameStorageKey(nameKey) {
+    return `${NAME_PREFIX}${nameKey}`;
+  }
+
+  async readActiveNameRecord(rawName) {
+    const name = normalizePlayerName(rawName);
+    if (!name) {
+      return { name: "", nameKey: "", record: null };
+    }
+    const nameKey = normalizeNameKey(name);
+    const storageKey = this.toNameStorageKey(nameKey);
+    const existing = await this.state.storage.get(storageKey);
+    if (!existing) {
+      return { name, nameKey, record: null };
+    }
+    const updatedAt = Number.isFinite(existing?.updatedAt) ? existing.updatedAt : 0;
+    if (!updatedAt || Date.now() - updatedAt > NAME_STALE_AFTER_MS) {
+      await this.state.storage.delete(storageKey);
+      return { name, nameKey, record: null };
+    }
+    return { name, nameKey, record: existing };
+  }
+
+  async getNameStatus(rawName, rawClientId = "") {
+    const clientId = normalizeClientId(rawClientId);
+    const { name, record } = await this.readActiveNameRecord(rawName);
+    if (!name) {
+      return { ok: false, error: "Invalid player name." };
+    }
+    if (!record) {
+      return {
+        ok: true,
+        name,
+        exists: false,
+        available: true,
+        ownedByRequester: false,
+        claimable: false,
+      };
+    }
+    const ownerClientId = normalizeClientId(record.ownerClientId || "");
+    const ownedByRequester = Boolean(clientId) && ownerClientId === clientId;
+    return {
+      ok: true,
+      name: normalizePlayerName(record.name || name),
+      exists: true,
+      available: ownedByRequester,
+      ownedByRequester,
+      claimable: !ownedByRequester,
+    };
+  }
+
+  async reserveName(rawName, rawClientId, rawRoomId = "", claim = false) {
+    const clientId = normalizeClientId(rawClientId);
+    if (!clientId) {
+      return { ok: false, error: "Missing client id.", reason: "missing-client" };
+    }
+    const roomId = normalizeRoomCode(rawRoomId || "");
+    const { name, nameKey, record: existing } = await this.readActiveNameRecord(rawName);
+    if (!name || !nameKey) {
+      return { ok: false, error: "Invalid player name.", reason: "invalid-name" };
+    }
+
+    const ownerClientId = normalizeClientId(existing?.ownerClientId || "");
+    const ownedByRequester = Boolean(existing) && ownerClientId === clientId;
+    if (existing && !ownedByRequester && claim !== true) {
+      return {
+        ok: false,
+        reason: "taken",
+        name: normalizePlayerName(existing.name || name),
+      };
+    }
+
+    const now = Date.now();
+    await this.state.storage.put(this.toNameStorageKey(nameKey), {
+      name,
+      nameKey,
+      ownerClientId: clientId,
+      roomId,
+      updatedAt: now,
+      claimedAt: existing && !ownedByRequester
+        ? now
+        : (Number.isFinite(existing?.claimedAt) ? existing.claimedAt : now),
+    });
+    return {
+      ok: true,
+      name,
+      claimed: Boolean(existing && !ownedByRequester),
+    };
+  }
+
+  async releaseName(rawName, rawClientId) {
+    const clientId = normalizeClientId(rawClientId);
+    const { name, nameKey, record: existing } = await this.readActiveNameRecord(rawName);
+    if (!name || !nameKey) {
+      return { ok: false, error: "Invalid player name.", reason: "invalid-name" };
+    }
+    if (!clientId) {
+      return { ok: false, error: "Missing client id.", reason: "missing-client" };
+    }
+    if (!existing) {
+      return { ok: true, released: false };
+    }
+    const ownerClientId = normalizeClientId(existing.ownerClientId || "");
+    if (ownerClientId !== clientId) {
+      return { ok: false, error: "Name is owned by another client.", reason: "not-owner" };
+    }
+    await this.state.storage.delete(this.toNameStorageKey(nameKey));
+    return { ok: true, released: true };
+  }
+
   async upsertRoom(roomId, players, updatedAt = Date.now()) {
     const normalizedPlayers = normalizePlayers(players);
     if (normalizedPlayers.length === 0) {
@@ -173,6 +301,48 @@ export class RoomDirectory {
   async fetch(request) {
     const url = new URL(request.url);
     const pathname = url.pathname || "/";
+
+    if (pathname.startsWith("/names/")) {
+      const requestedName = normalizePlayerName(decodePathSegment(pathname.slice(7)));
+      if (!requestedName) {
+        return json({ error: "Invalid player name." }, 400);
+      }
+
+      if (request.method === "GET") {
+        const clientId = normalizeClientId(
+          url.searchParams.get("client") || url.searchParams.get("clientId") || "",
+        );
+        const status = await this.getNameStatus(requestedName, clientId);
+        return json(status, status.ok ? 200 : 400);
+      }
+
+      if (request.method === "PUT") {
+        let payload;
+        try {
+          payload = await request.json();
+        } catch {
+          return json({ error: "Invalid JSON payload." }, 400);
+        }
+        const result = await this.reserveName(
+          requestedName,
+          payload?.clientId,
+          payload?.roomId,
+          payload?.claim === true,
+        );
+        if (!result.ok && result.reason === "taken") {
+          return json(result, 409);
+        }
+        return json(result, result.ok ? 200 : 400);
+      }
+
+      if (request.method === "DELETE") {
+        const clientId = normalizeClientId(
+          url.searchParams.get("client") || url.searchParams.get("clientId") || "",
+        );
+        const result = await this.releaseName(requestedName, clientId);
+        return json(result, result.ok ? 200 : 409);
+      }
+    }
 
     if (request.method === "GET" && pathname === "/rooms") {
       const rooms = await this.listRooms();
@@ -242,10 +412,15 @@ export class RendezvousRoom {
     return players.slice(0, 2);
   }
 
-  async syncDirectory(roomId) {
-    if (!this.env?.ROOM_DIRECTORY) return;
+  getDirectoryStub() {
+    if (!this.env?.ROOM_DIRECTORY) return null;
     const directoryObjectId = this.env.ROOM_DIRECTORY.idFromName("global");
-    const directoryStub = this.env.ROOM_DIRECTORY.get(directoryObjectId);
+    return this.env.ROOM_DIRECTORY.get(directoryObjectId);
+  }
+
+  async syncDirectory(roomId) {
+    const directoryStub = this.getDirectoryStub();
+    if (!directoryStub) return;
     const targetUrl = `https://directory/rooms/${encodeURIComponent(roomId)}`;
     const players = this.serializePlayers();
     if (players.length === 0) {
@@ -261,6 +436,67 @@ export class RendezvousRoom {
         updatedAt: Date.now(),
       }),
     }));
+  }
+
+  async reserveName(name, clientId, roomId, claim = false) {
+    const normalizedName = normalizePlayerName(name);
+    const normalizedClientId = normalizeClientId(clientId);
+    if (!normalizedName) {
+      return { ok: false, reason: "invalid-name", error: "Invalid player name." };
+    }
+    if (!normalizedClientId) {
+      return { ok: false, reason: "missing-client", error: "Missing client id." };
+    }
+    const directoryStub = this.getDirectoryStub();
+    if (!directoryStub) {
+      return { ok: true, name: normalizedName, claimed: false };
+    }
+    const targetUrl = `https://directory/names/${encodeURIComponent(normalizedName)}`;
+    const response = await directoryStub.fetch(new Request(targetUrl, {
+      method: "PUT",
+      headers: { "content-type": "application/json; charset=utf-8" },
+      body: JSON.stringify({
+        clientId: normalizedClientId,
+        roomId,
+        claim: claim === true,
+      }),
+    }));
+    let payload = {};
+    try {
+      payload = await response.json();
+    } catch {
+      payload = {};
+    }
+    if (response.status === 409) {
+      return {
+        ok: false,
+        reason: "taken",
+        name: normalizePlayerName(payload?.name || normalizedName),
+      };
+    }
+    if (!response.ok) {
+      return {
+        ok: false,
+        reason: "error",
+        error: payload?.error || `Name reservation failed (${response.status}).`,
+      };
+    }
+    return {
+      ok: true,
+      name: normalizePlayerName(payload?.name || normalizedName),
+      claimed: payload?.claimed === true,
+    };
+  }
+
+  async releaseName(name, clientId) {
+    const normalizedName = normalizePlayerName(name);
+    const normalizedClientId = normalizeClientId(clientId);
+    if (!normalizedName || !normalizedClientId) return;
+    const directoryStub = this.getDirectoryStub();
+    if (!directoryStub) return;
+    const targetUrl = new URL(`https://directory/names/${encodeURIComponent(normalizedName)}`);
+    targetUrl.searchParams.set("client", normalizedClientId);
+    await directoryStub.fetch(new Request(targetUrl.toString(), { method: "DELETE" }));
   }
 
   async ensureRoomStateLoaded() {
@@ -290,6 +526,43 @@ export class RendezvousRoom {
     return true;
   }
 
+  async forceEndRoomState() {
+    await this.ensureRoomStateLoaded();
+    const payload = this.roomState?.payload;
+    if (!payload || payload.gameOver === true) return;
+    await this.persistRoomState({
+      ...payload,
+      gameOver: true,
+      winnerSide: "",
+      resignedBySide: "",
+      awaitingRoll: false,
+      remainingDice: [],
+      diceOwners: [],
+      message: "Game ended because all players left the room.",
+    });
+  }
+
+  async markRoomEmpty(roomId) {
+    const now = Date.now();
+    await this.state.storage.put(ROOM_ID_KEY, roomId);
+    await this.state.storage.put(ROOM_EMPTY_AT_KEY, now);
+    await this.state.storage.setAlarm(now + ROOM_EMPTY_CLEANUP_AFTER_MS);
+  }
+
+  async clearRoomEmptyMarker(roomId = "") {
+    if (roomId) {
+      await this.state.storage.put(ROOM_ID_KEY, roomId);
+    }
+    await this.state.storage.delete(ROOM_EMPTY_AT_KEY);
+    if (this.sessions.size > 0) {
+      try {
+        await this.state.storage.deleteAlarm();
+      } catch {
+        // No alarm scheduled.
+      }
+    }
+  }
+
   send(socket, payload) {
     try {
       socket.send(JSON.stringify(payload));
@@ -305,7 +578,126 @@ export class RendezvousRoom {
     }
   }
 
-  closeSession(sessionId, roomId) {
+  async assignSessionName(sessionId, roomId, rawName, { claim = false } = {}) {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      return { ok: false, reason: "session-missing", error: "Session is no longer active." };
+    }
+    const nextName = normalizePlayerName(rawName || "");
+    const currentName = normalizePlayerName(session.name || "");
+    if (!nextName) {
+      if (currentName) {
+        await this.releaseName(currentName, session.clientId);
+      }
+      session.name = "";
+      this.sessions.set(sessionId, session);
+      return { ok: true, changed: currentName !== "", name: "" };
+    }
+
+    const reservation = await this.reserveName(nextName, session.clientId, roomId, claim);
+    if (!reservation.ok) {
+      return reservation;
+    }
+
+    const finalName = normalizePlayerName(reservation.name || nextName);
+    const changed = currentName.toLowerCase() !== finalName.toLowerCase();
+    if (changed && currentName) {
+      await this.releaseName(currentName, session.clientId);
+    }
+    session.name = finalName;
+    this.sessions.set(sessionId, session);
+    return {
+      ok: true,
+      changed,
+      name: finalName,
+      claimed: reservation.claimed === true,
+    };
+  }
+
+  async handleSessionMessage(sessionId, roomId, role, server, rawData) {
+    let parsed;
+    try {
+      parsed = JSON.parse(rawData);
+    } catch {
+      this.send(server, { type: "error", message: "Invalid JSON payload." });
+      return;
+    }
+
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+
+    if (parsed?.type === "set-name") {
+      const result = await this.assignSessionName(
+        sessionId,
+        roomId,
+        parsed?.name || "",
+        { claim: parsed?.claim === true },
+      );
+      if (!result.ok && result.reason === "taken") {
+        this.send(server, {
+          type: "name-conflict",
+          requestedName: normalizePlayerName(parsed?.name || ""),
+        });
+        return;
+      }
+      if (!result.ok) {
+        this.send(server, {
+          type: "error",
+          message: result.error || "Could not update player name.",
+        });
+        return;
+      }
+      const currentSession = this.sessions.get(sessionId);
+      this.send(server, {
+        type: "name-updated",
+        name: currentSession?.name || "",
+        claimed: result.claimed === true,
+      });
+      if (result.changed) {
+        this.broadcast(
+          {
+            type: "peer-name",
+            role,
+            name: currentSession?.name || "",
+          },
+          sessionId,
+        );
+      }
+      await this.syncDirectory(roomId);
+      return;
+    }
+
+    if (parsed?.type === "room-state") {
+      await this.persistRoomState(parsed.payload);
+      if (session.name && session.clientId) {
+        void this.reserveName(session.name, session.clientId, roomId, false);
+      }
+      return;
+    }
+
+    if (parsed?.type !== "signal") {
+      this.send(server, { type: "error", message: "Unsupported message type." });
+      return;
+    }
+
+    this.broadcast(
+      {
+        type: "signal",
+        fromRole: role,
+        payload: parsed.payload,
+      },
+      sessionId,
+    );
+    if (parsed?.payload?.kind === "state-sync") {
+      await this.persistRoomState(parsed.payload.state || parsed.payload.payload || null);
+    }
+    if (session.name && session.clientId) {
+      void this.reserveName(session.name, session.clientId, roomId, false);
+    }
+    await this.syncDirectory(roomId);
+  }
+
+  async closeSession(sessionId, roomId) {
     if (!this.sessions.has(sessionId)) return;
     this.sessions.delete(sessionId);
     const players = this.serializePlayers();
@@ -314,7 +706,31 @@ export class RendezvousRoom {
       peerCount: this.sessions.size,
       players,
     });
-    void this.syncDirectory(roomId);
+    if (this.sessions.size === 0) {
+      await this.forceEndRoomState();
+      await this.markRoomEmpty(roomId);
+    } else {
+      await this.clearRoomEmptyMarker(roomId);
+    }
+    await this.syncDirectory(roomId);
+  }
+
+  async alarm() {
+    if (this.sessions.size > 0) return;
+    const emptyAt = await this.state.storage.get(ROOM_EMPTY_AT_KEY);
+    if (!Number.isFinite(emptyAt)) return;
+    const expiresAt = emptyAt + ROOM_EMPTY_CLEANUP_AFTER_MS;
+    if (Date.now() < expiresAt) {
+      await this.state.storage.setAlarm(expiresAt);
+      return;
+    }
+    await this.state.storage.delete([ROOM_STATE_KEY, ROOM_EMPTY_AT_KEY]);
+    this.roomState = null;
+    this.roomStateLoaded = true;
+    const roomId = normalizeRoomCode(await this.state.storage.get(ROOM_ID_KEY) || "");
+    if (roomId) {
+      await this.syncDirectory(roomId);
+    }
   }
 
   async fetch(request) {
@@ -329,6 +745,7 @@ export class RendezvousRoom {
     if (!roomId) {
       return json({ error: "Invalid room id." }, 400);
     }
+    await this.state.storage.put(ROOM_ID_KEY, roomId);
 
     const role = this.assignRole();
     if (!role) {
@@ -341,77 +758,65 @@ export class RendezvousRoom {
     server.accept();
 
     const sessionId = crypto.randomUUID();
-    const playerName = normalizePlayerName(url.searchParams.get("name") || "");
-    this.sessions.set(sessionId, { socket: server, role, name: playerName });
+    const requestedName = normalizePlayerName(url.searchParams.get("name") || "");
+    const rawClientId = normalizeClientId(
+      url.searchParams.get("client") || url.searchParams.get("clientId") || "",
+    );
+    const clientId = rawClientId || normalizeClientId(sessionId);
+    this.sessions.set(sessionId, {
+      socket: server,
+      role,
+      name: "",
+      clientId,
+    });
+
+    if (this.sessions.size === 1) {
+      await this.clearRoomEmptyMarker(roomId);
+    }
+
+    let nameConflict = "";
+    if (requestedName) {
+      const result = await this.assignSessionName(
+        sessionId,
+        roomId,
+        requestedName,
+        { claim: false },
+      );
+      if (!result.ok && result.reason === "taken") {
+        nameConflict = normalizePlayerName(result.name || requestedName);
+      }
+    }
 
     server.addEventListener("message", (event) => {
-      let parsed;
-      try {
-        parsed = JSON.parse(event.data);
-      } catch {
-        this.send(server, { type: "error", message: "Invalid JSON payload." });
-        return;
-      }
-
-      if (parsed?.type === "set-name") {
-        const session = this.sessions.get(sessionId);
-        if (!session) return;
-        session.name = normalizePlayerName(parsed?.name || "");
-        this.sessions.set(sessionId, session);
-        this.send(server, { type: "name-updated", name: session.name });
-        this.broadcast(
-          {
-            type: "peer-name",
-            role,
-            name: session.name,
-          },
-          sessionId,
-        );
-        void this.syncDirectory(roomId);
-        return;
-      }
-
-      if (parsed?.type === "room-state") {
-        void this.persistRoomState(parsed.payload);
-        return;
-      }
-
-      if (parsed?.type !== "signal") {
-        this.send(server, { type: "error", message: "Unsupported message type." });
-        return;
-      }
-
-      this.broadcast(
-        {
-          type: "signal",
-          fromRole: role,
-          payload: parsed.payload,
-        },
-        sessionId,
-      );
-      if (parsed?.payload?.kind === "state-sync") {
-        void this.persistRoomState(parsed.payload.state || parsed.payload.payload || null);
-      }
-      void this.syncDirectory(roomId);
+      void this.handleSessionMessage(sessionId, roomId, role, server, event.data);
     });
 
     server.addEventListener("close", () => {
-      this.closeSession(sessionId, roomId);
+      void this.closeSession(sessionId, roomId);
     });
 
     server.addEventListener("error", () => {
-      this.closeSession(sessionId, roomId);
+      void this.closeSession(sessionId, roomId);
     });
 
     const players = this.serializePlayers();
+    const localSession = this.sessions.get(sessionId);
     this.send(server, {
       type: "joined",
       roomId,
       role,
       peerCount: this.sessions.size,
       players,
+      localName: localSession?.name || "",
       roomState: this.roomState?.payload || null,
     });
+
+    if (nameConflict) {
+      this.send(server, {
+        type: "name-conflict",
+        requestedName: nameConflict,
+      });
+    }
 
     this.broadcast(
       {
@@ -422,7 +827,7 @@ export class RendezvousRoom {
       sessionId,
     );
 
-    void this.syncDirectory(roomId);
+    await this.syncDirectory(roomId);
 
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -446,6 +851,13 @@ export default {
       return directoryStub.fetch(new Request("https://directory/rooms", request));
     }
 
+    if (url.pathname.startsWith("/names/")) {
+      const directoryObjectId = env.ROOM_DIRECTORY.idFromName("global");
+      const directoryStub = env.ROOM_DIRECTORY.get(directoryObjectId);
+      const targetUrl = `https://directory${url.pathname}${url.search}`;
+      return directoryStub.fetch(new Request(targetUrl, request));
+    }
+
     if (url.pathname.startsWith("/ws/")) {
       const roomId = normalizeRoomCode(decodePathSegment(url.pathname.slice(4)));
       if (!roomId) {
@@ -465,6 +877,7 @@ export default {
         service: "bg-rendezvous",
         routes: {
           rooms: "GET /rooms",
+          names: "GET|PUT|DELETE /names/:name",
           websocket: "GET /ws/:room",
           health: "GET /health",
         },

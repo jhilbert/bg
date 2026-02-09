@@ -36,11 +36,13 @@ Players connect through a shared room list backed by Cloudflare Durable Objects.
 ### 2) Use the room flow in the UI
 - Default mode is **Vs Computer**.
 - Click **Rooms** in the top panel.
-- In the modal, set your player name (optional but recommended).
+- In the modal, set your player name (stored locally and reserved in Cloudflare for uniqueness).
+- If a name is already reserved by someone else, use **Claim My Name** to take it over.
 - Click **Create New Room** to create a room and join it as host.
 - Other players open the same modal, see active rooms, and click **Join** on rooms with one player.
 - To leave your room, open **Rooms** and click **Leave** on your current room entry.
 - Signaling and room directory state relay through Durable Objects; WebRTC connects automatically.
+- Empty rooms are cleaned up after 24 hours of inactivity; if both players leave, the game is ended.
 
 ## Bear off mode
 - You can bear off only after all of your remaining checkers are in the home board (points 1-6 for the player). Checkers already borne off still count toward the total, so you can keep bearing off after the first one leaves the board.
