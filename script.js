@@ -1104,7 +1104,7 @@ function endTurn() {
     render();
     return;
   }
-  if (hasAnyLegalMoves(state, "player", state.remainingDice)) {
+  if (hasAnyLegalMoves(state, state.turn, state.remainingDice)) {
     state.message = "You must play all usable dice before ending your turn.";
     render();
     return;
