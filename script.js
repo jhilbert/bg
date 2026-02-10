@@ -4,8 +4,12 @@ const STORAGE_KEY = "bg-save";
 const PROFILE_STORAGE_KEY = "bg-profile";
 const AI_MOVE_TOTAL_MS = 3000;
 const AI_MOVE_MIN_STEP_MS = 450;
-const COMMIT_VERSION = "V2026-02-10-1";
+const COMMIT_VERSION = "V2026-02-10-2";
 const SIGNALING_BASE_URL = "https://bg-rendezvous.hilbert.workers.dev";
+const SIGNALING_RECONNECT_BASE_MS = 700;
+const SIGNALING_RECONNECT_MAX_MS = 8000;
+const HOST_NEGOTIATION_RETRY_MS = 2600;
+const HOST_DISCONNECT_GRACE_MS = 3500;
 const RTC_CONFIG = {
   iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
 };
@@ -56,6 +60,12 @@ const rtc = {
   role: null,
   connected: false,
   signalingSocket: null,
+  signalingBaseUrl: "",
+  signalingReconnectAttempts: 0,
+  manualDisconnect: false,
+  negotiationInFlight: false,
+  queuedNegotiationIceRestart: false,
+  queuedNegotiationReason: "",
   roomId: "",
   peerCount: 0,
   pendingRemoteCandidates: [],
@@ -64,6 +74,9 @@ const rtc = {
 
 let autoDiceRollTimer = null;
 let roomListPollTimer = null;
+let signalingReconnectTimer = null;
+let hostNegotiationRetryTimer = null;
+let hostDisconnectGraceTimer = null;
 
 const elements = {
   topRow: document.getElementById("top-row"),
@@ -1665,7 +1678,9 @@ function updateNetworkStatus(forcedMessage) {
   }
   const roomPrefix = rtc.roomId ? `Room ${rtc.roomId}. ` : "";
   if (rtc.connected) {
-    elements.networkStatus.textContent = `${roomPrefix}Connected. You are ${sideLabel(state.localSide)}.`;
+    elements.networkStatus.textContent = isSignalingOpen()
+      ? `${roomPrefix}Connected. You are ${sideLabel(state.localSide)}.`
+      : `${roomPrefix}Peer connected. Reconnecting signaling...`;
     return;
   }
   if (rtc.signalingSocket && rtc.signalingSocket.readyState === WebSocket.OPEN) {
@@ -1680,6 +1695,12 @@ function updateNetworkStatus(forcedMessage) {
       return;
     }
     elements.networkStatus.textContent = `${roomPrefix}You are ${sideLabel("ai")}. Waiting for ${sideLabel("player")} offer...`;
+    return;
+  }
+  if (rtc.roomId) {
+    elements.networkStatus.textContent = rtc.connected
+      ? `${roomPrefix}Peer connected. Reconnecting signaling...`
+      : `${roomPrefix}Signaling disconnected. Reconnecting...`;
     return;
   }
   elements.networkStatus.textContent = "No active room.";
@@ -2238,7 +2259,141 @@ function setRoomQueryParam(roomId) {
   window.history.replaceState({}, "", url.toString());
 }
 
+function isSignalingOpen() {
+  return Boolean(rtc.signalingSocket && rtc.signalingSocket.readyState === WebSocket.OPEN);
+}
+
+function isSignalingConnecting() {
+  return Boolean(rtc.signalingSocket && rtc.signalingSocket.readyState === WebSocket.CONNECTING);
+}
+
+function canHostRenegotiate() {
+  return state.gameMode === "p2p" && rtc.role === "host" && rtc.peerCount > 1;
+}
+
+function clearSignalingReconnectTimer() {
+  if (!signalingReconnectTimer) return;
+  clearTimeout(signalingReconnectTimer);
+  signalingReconnectTimer = null;
+}
+
+function clearHostNegotiationRetryTimer() {
+  if (!hostNegotiationRetryTimer) {
+    rtc.queuedNegotiationIceRestart = false;
+    rtc.queuedNegotiationReason = "";
+    return;
+  }
+  clearTimeout(hostNegotiationRetryTimer);
+  hostNegotiationRetryTimer = null;
+  rtc.queuedNegotiationIceRestart = false;
+  rtc.queuedNegotiationReason = "";
+}
+
+function clearHostDisconnectGraceTimer() {
+  if (!hostDisconnectGraceTimer) return;
+  clearTimeout(hostDisconnectGraceTimer);
+  hostDisconnectGraceTimer = null;
+}
+
+function shouldAttemptSignalingReconnect() {
+  return state.gameMode === "p2p" && Boolean(rtc.roomId) && !rtc.manualDisconnect;
+}
+
+function scheduleSignalingReconnect({ immediate = false } = {}) {
+  if (!shouldAttemptSignalingReconnect()) return;
+  if (isSignalingOpen() || isSignalingConnecting()) return;
+  if (signalingReconnectTimer) return;
+  const backoffStep = Math.max(0, rtc.signalingReconnectAttempts);
+  const delayMs = immediate
+    ? 0
+    : Math.min(SIGNALING_RECONNECT_BASE_MS * (2 ** backoffStep), SIGNALING_RECONNECT_MAX_MS);
+  signalingReconnectTimer = setTimeout(() => {
+    signalingReconnectTimer = null;
+    void reconnectSignalingSocket();
+  }, delayMs);
+}
+
+async function reconnectSignalingSocket() {
+  if (!shouldAttemptSignalingReconnect()) return;
+  if (isSignalingOpen() || isSignalingConnecting()) return;
+  try {
+    const baseUrl = rtc.signalingBaseUrl || getSignalingBaseUrl();
+    await openSignalingSocket(baseUrl, rtc.roomId, state.localPlayerName);
+    rtc.signalingReconnectAttempts = 0;
+    if (!rtc.connected) {
+      updateNetworkStatus("Signaling restored. Reconnecting peer link...");
+      render();
+    }
+    if (canHostRenegotiate() && !rtc.connected) {
+      scheduleHostNegotiationRetry({
+        delayMs: 250,
+        reason: "Signaling reconnected.",
+        iceRestart: true,
+      });
+    }
+  } catch (error) {
+    rtc.signalingReconnectAttempts += 1;
+    if (!shouldAttemptSignalingReconnect()) return;
+    state.message = "Signaling reconnect failed. Retrying...";
+    updateNetworkStatus("Signaling reconnect failed. Retrying...");
+    render();
+    scheduleSignalingReconnect();
+  }
+}
+
+function scheduleHostNegotiationRetry({
+  delayMs = HOST_NEGOTIATION_RETRY_MS,
+  reason = "",
+  iceRestart = true,
+} = {}) {
+  if (!canHostRenegotiate()) return;
+  if (iceRestart) {
+    rtc.queuedNegotiationIceRestart = true;
+  }
+  if (reason) {
+    rtc.queuedNegotiationReason = reason;
+  }
+  if (hostNegotiationRetryTimer) return;
+  hostNegotiationRetryTimer = setTimeout(() => {
+    hostNegotiationRetryTimer = null;
+    if (!canHostRenegotiate() || rtc.connected) {
+      rtc.queuedNegotiationIceRestart = false;
+      rtc.queuedNegotiationReason = "";
+      return;
+    }
+    const retryIceRestart = rtc.queuedNegotiationIceRestart;
+    const retryReason = rtc.queuedNegotiationReason;
+    rtc.queuedNegotiationIceRestart = false;
+    rtc.queuedNegotiationReason = "";
+    void startHostNegotiation({
+      iceRestart: retryIceRestart,
+      reason: retryReason,
+    });
+  }, Math.max(150, delayMs));
+}
+
+function scheduleHostDisconnectRecovery(reason = "") {
+  if (!canHostRenegotiate()) return;
+  if (hostDisconnectGraceTimer) return;
+  hostDisconnectGraceTimer = setTimeout(() => {
+    hostDisconnectGraceTimer = null;
+    if (!canHostRenegotiate() || rtc.connected) return;
+    void startHostNegotiation({
+      iceRestart: true,
+      reason: reason || "Peer disconnected.",
+    });
+    scheduleHostNegotiationRetry({
+      delayMs: HOST_NEGOTIATION_RETRY_MS,
+      reason: "Waiting for peer reconnection.",
+      iceRestart: true,
+    });
+  }, HOST_DISCONNECT_GRACE_MS);
+}
+
 function closePeerTransport(keepRole = false) {
+  clearHostDisconnectGraceTimer();
+  clearHostNegotiationRetryTimer();
+  rtc.negotiationInFlight = false;
   if (rtc.channel) {
     rtc.channel.onopen = null;
     rtc.channel.onclose = null;
@@ -2250,6 +2405,7 @@ function closePeerTransport(keepRole = false) {
   }
   if (rtc.pc) {
     rtc.pc.onconnectionstatechange = null;
+    rtc.pc.oniceconnectionstatechange = null;
     rtc.pc.ondatachannel = null;
     rtc.pc.onicecandidate = null;
     rtc.pc.close();
@@ -2264,6 +2420,9 @@ function closePeerTransport(keepRole = false) {
 }
 
 function clearPeerSession() {
+  clearSignalingReconnectTimer();
+  clearHostDisconnectGraceTimer();
+  clearHostNegotiationRetryTimer();
   const activeSocket = rtc.signalingSocket;
   rtc.signalingSocket = null;
   if (activeSocket) {
@@ -2279,6 +2438,8 @@ function clearPeerSession() {
     }
   }
   closePeerTransport();
+  rtc.signalingBaseUrl = "";
+  rtc.signalingReconnectAttempts = 0;
   rtc.roomId = "";
   rtc.peerCount = 0;
   rtc.generatedSignal = "";
@@ -2286,6 +2447,7 @@ function clearPeerSession() {
 }
 
 function openSignalingSocket(baseUrl, roomId, playerName = "") {
+  rtc.signalingBaseUrl = baseUrl;
   const socketUrl = buildSignalingSocketUrl(
     baseUrl,
     roomId,
@@ -2308,6 +2470,8 @@ function openSignalingSocket(baseUrl, roomId, playerName = "") {
 
     socket.onopen = () => {
       if (rtc.signalingSocket !== socket) return;
+      clearSignalingReconnectTimer();
+      rtc.signalingReconnectAttempts = 0;
       if (!settled) {
         settled = true;
         resolve();
@@ -2328,13 +2492,33 @@ function openSignalingSocket(baseUrl, roomId, playerName = "") {
     socket.onclose = () => {
       if (rtc.signalingSocket !== socket) return;
       rtc.signalingSocket = null;
-      rtc.connected = false;
-      closePeerTransport(true);
-      rtc.peerCount = 0;
-      if (state.gameMode === "p2p") {
-        state.message = "Disconnected from signaling.";
+      if (!settled) {
+        fail("Could not connect to the signaling service.");
+        return;
       }
-      updateNetworkStatus();
+      if (shouldAttemptSignalingReconnect()) {
+        if (rtc.connected) {
+          state.message = "Signaling disconnected. Peer link still active.";
+          updateNetworkStatus("Peer connected. Reconnecting signaling...");
+        } else {
+          state.message = "Signaling disconnected. Reconnecting...";
+          updateNetworkStatus("Signaling disconnected. Reconnecting...");
+          scheduleHostNegotiationRetry({
+            delayMs: HOST_NEGOTIATION_RETRY_MS,
+            reason: "Signaling dropped during negotiation.",
+            iceRestart: true,
+          });
+        }
+        scheduleSignalingReconnect();
+      } else {
+        rtc.connected = false;
+        closePeerTransport(true);
+        rtc.peerCount = 0;
+        if (state.gameMode === "p2p") {
+          state.message = "Disconnected from signaling.";
+        }
+        updateNetworkStatus();
+      }
       void fetchAvailableRooms({ silent: true });
       render();
     };
@@ -2342,34 +2526,61 @@ function openSignalingSocket(baseUrl, roomId, playerName = "") {
 }
 
 function sendSignalPayload(payload) {
-  if (!rtc.signalingSocket || rtc.signalingSocket.readyState !== WebSocket.OPEN) {
+  if (!isSignalingOpen()) {
+    if (shouldAttemptSignalingReconnect()) {
+      scheduleSignalingReconnect();
+    }
     return false;
   }
-  rtc.signalingSocket.send(JSON.stringify({ type: "signal", payload }));
-  return true;
+  try {
+    rtc.signalingSocket.send(JSON.stringify({ type: "signal", payload }));
+    return true;
+  } catch {
+    if (shouldAttemptSignalingReconnect()) {
+      scheduleSignalingReconnect();
+    }
+    return false;
+  }
 }
 
 function sendRoomStateToSignaling(payload) {
-  if (!rtc.signalingSocket || rtc.signalingSocket.readyState !== WebSocket.OPEN) {
+  if (!isSignalingOpen()) {
+    if (shouldAttemptSignalingReconnect()) {
+      scheduleSignalingReconnect();
+    }
     return false;
   }
-  rtc.signalingSocket.send(JSON.stringify({
-    type: "room-state",
-    payload,
-  }));
-  return true;
+  try {
+    rtc.signalingSocket.send(JSON.stringify({
+      type: "room-state",
+      payload,
+    }));
+    return true;
+  } catch {
+    if (shouldAttemptSignalingReconnect()) {
+      scheduleSignalingReconnect();
+    }
+    return false;
+  }
 }
 
 function sendPlayerNameToSignaling({ name = state.localPlayerName, claim = false } = {}) {
-  if (!rtc.signalingSocket || rtc.signalingSocket.readyState !== WebSocket.OPEN) {
+  if (!isSignalingOpen()) {
     return false;
   }
-  rtc.signalingSocket.send(JSON.stringify({
-    type: "set-name",
-    name: normalizePlayerName(name),
-    claim: claim === true,
-  }));
-  return true;
+  try {
+    rtc.signalingSocket.send(JSON.stringify({
+      type: "set-name",
+      name: normalizePlayerName(name),
+      claim: claim === true,
+    }));
+    return true;
+  } catch {
+    if (shouldAttemptSignalingReconnect()) {
+      scheduleSignalingReconnect();
+    }
+    return false;
+  }
 }
 
 function applyRemoteGameState(payload) {
@@ -2463,6 +2674,13 @@ function attachDataChannel(channel) {
   rtc.channel = channel;
   rtc.channel.onopen = () => {
     rtc.connected = true;
+    clearHostDisconnectGraceTimer();
+    if (hostNegotiationRetryTimer) {
+      clearTimeout(hostNegotiationRetryTimer);
+      hostNegotiationRetryTimer = null;
+    }
+    rtc.queuedNegotiationIceRestart = false;
+    rtc.queuedNegotiationReason = "";
     state.message = "Peer connected.";
     updateNetworkStatus("Peer connected.");
     closeConnectionModal();
@@ -2471,10 +2689,16 @@ function attachDataChannel(channel) {
   };
   rtc.channel.onclose = () => {
     rtc.connected = false;
+    scheduleHostDisconnectRecovery("Data channel closed.");
     updateNetworkStatus("Peer disconnected.");
     render();
   };
   rtc.channel.onerror = () => {
+    scheduleHostNegotiationRetry({
+      delayMs: HOST_NEGOTIATION_RETRY_MS,
+      reason: "Data channel error.",
+      iceRestart: true,
+    });
     updateNetworkStatus("Data channel error.");
     render();
   };
@@ -2501,17 +2725,59 @@ function createPeerConnection(role) {
     return rtc.pc;
   }
   rtc.pc = new RTCPeerConnection(RTC_CONFIG);
-  rtc.pc.onconnectionstatechange = () => {
+  const handleRtcStateChange = () => {
     if (!rtc.pc) return;
-    if (rtc.pc.connectionState === "connected") {
-      rtc.connected = true;
+    const connectionState = rtc.pc.connectionState;
+    if (connectionState === "connected") {
+      if (rtc.channel && rtc.channel.readyState === "open") {
+        rtc.connected = true;
+      }
+      clearHostDisconnectGraceTimer();
+      clearHostNegotiationRetryTimer();
     }
-    if (
-      rtc.pc.connectionState === "failed"
-      || rtc.pc.connectionState === "closed"
-      || rtc.pc.connectionState === "disconnected"
-    ) {
+    if (connectionState === "disconnected") {
       rtc.connected = false;
+      scheduleHostDisconnectRecovery("Peer connection disconnected.");
+    }
+    if (connectionState === "failed") {
+      rtc.connected = false;
+      scheduleHostNegotiationRetry({
+        delayMs: 250,
+        reason: "Peer connection failed.",
+        iceRestart: true,
+      });
+    }
+    if (connectionState === "closed") {
+      rtc.connected = false;
+      clearHostDisconnectGraceTimer();
+    }
+    updateNetworkStatus();
+    render();
+  };
+  rtc.pc.onconnectionstatechange = () => {
+    handleRtcStateChange();
+  };
+  rtc.pc.oniceconnectionstatechange = () => {
+    if (!rtc.pc) return;
+    const iceState = rtc.pc.iceConnectionState;
+    if (iceState === "connected" || iceState === "completed") {
+      clearHostDisconnectGraceTimer();
+      clearHostNegotiationRetryTimer();
+      if (rtc.channel && rtc.channel.readyState === "open") {
+        rtc.connected = true;
+      }
+    }
+    if (iceState === "disconnected") {
+      rtc.connected = false;
+      scheduleHostDisconnectRecovery("ICE disconnected.");
+    }
+    if (iceState === "failed") {
+      rtc.connected = false;
+      scheduleHostNegotiationRetry({
+        delayMs: 250,
+        reason: "ICE failed.",
+        iceRestart: true,
+      });
     }
     updateNetworkStatus();
     render();
@@ -2528,7 +2794,11 @@ function createPeerConnection(role) {
 
 function ensureHostPeerConnection() {
   const pc = createPeerConnection("host");
-  if (!rtc.channel || rtc.channel.readyState === "closed") {
+  if (
+    !rtc.channel
+    || rtc.channel.readyState === "closed"
+    || rtc.channel.readyState === "closing"
+  ) {
     const dataChannel = pc.createDataChannel("bg-state");
     attachDataChannel(dataChannel);
   }
@@ -2551,18 +2821,81 @@ async function applyQueuedRemoteCandidates() {
   }
 }
 
-async function startHostNegotiation() {
-  if (rtc.role !== "host") return;
-  if (rtc.peerCount < 2) return;
-  const pc = ensureHostPeerConnection();
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-  if (!sendSignalPayload({ kind: "offer", description: pc.localDescription })) {
-    throw new Error("Signaling channel is not open.");
+async function startHostNegotiation({ iceRestart = false, reason = "" } = {}) {
+  if (!canHostRenegotiate()) return false;
+  if (!isSignalingOpen()) {
+    scheduleSignalingReconnect();
+    scheduleHostNegotiationRetry({
+      delayMs: HOST_NEGOTIATION_RETRY_MS,
+      reason: reason || "Waiting for signaling connection.",
+      iceRestart: true,
+    });
+    return false;
   }
-  state.message = `Offer sent to ${sideLabel("ai")}. Waiting for answer...`;
-  updateNetworkStatus();
-  render();
+  if (rtc.negotiationInFlight) {
+    if (iceRestart) {
+      rtc.queuedNegotiationIceRestart = true;
+    }
+    if (reason) {
+      rtc.queuedNegotiationReason = reason;
+    }
+    return false;
+  }
+  const pc = ensureHostPeerConnection();
+  if (pc.signalingState !== "stable") {
+    scheduleHostNegotiationRetry({
+      delayMs: HOST_NEGOTIATION_RETRY_MS,
+      reason: reason || "Waiting for stable signaling state.",
+      iceRestart: true,
+    });
+    return false;
+  }
+  rtc.negotiationInFlight = true;
+  try {
+    const offer = await pc.createOffer(iceRestart ? { iceRestart: true } : undefined);
+    await pc.setLocalDescription(offer);
+    if (!sendSignalPayload({ kind: "offer", description: pc.localDescription })) {
+      scheduleSignalingReconnect({ immediate: true });
+      scheduleHostNegotiationRetry({
+        delayMs: HOST_NEGOTIATION_RETRY_MS,
+        reason: reason || "Signaling unavailable during offer send.",
+        iceRestart: true,
+      });
+      return false;
+    }
+    if (hostNegotiationRetryTimer) {
+      clearTimeout(hostNegotiationRetryTimer);
+      hostNegotiationRetryTimer = null;
+    }
+    state.message = iceRestart
+      ? `Reconnecting peer link with ${sideLabel("ai")}...`
+      : `Offer sent to ${sideLabel("ai")}. Waiting for answer...`;
+    updateNetworkStatus();
+    render();
+    return true;
+  } catch (error) {
+    scheduleHostNegotiationRetry({
+      delayMs: HOST_NEGOTIATION_RETRY_MS,
+      reason: `Negotiation failed: ${error?.message || "unknown error"}.`,
+      iceRestart: true,
+    });
+    updateNetworkStatus("WebRTC negotiation failed. Retrying...");
+    render();
+    return false;
+  } finally {
+    rtc.negotiationInFlight = false;
+    if (rtc.queuedNegotiationIceRestart || rtc.queuedNegotiationReason) {
+      const queuedReason = rtc.queuedNegotiationReason;
+      const queuedIceRestart = rtc.queuedNegotiationIceRestart;
+      rtc.queuedNegotiationReason = "";
+      rtc.queuedNegotiationIceRestart = false;
+      scheduleHostNegotiationRetry({
+        delayMs: 250,
+        reason: queuedReason,
+        iceRestart: queuedIceRestart,
+      });
+    }
+  }
 }
 
 async function handleOfferSignal(description) {
@@ -2588,6 +2921,13 @@ async function handleAnswerSignal(description) {
   await rtc.pc.setRemoteDescription(description);
   await applyQueuedRemoteCandidates();
   state.message = "Answer received. Finalizing peer connection...";
+  if (!rtc.connected) {
+    scheduleHostNegotiationRetry({
+      delayMs: HOST_NEGOTIATION_RETRY_MS,
+      reason: "Awaiting final WebRTC connection.",
+      iceRestart: true,
+    });
+  }
   updateNetworkStatus();
   render();
 }
@@ -2607,20 +2947,31 @@ async function handleIceCandidateSignal(candidate) {
 
 async function handleIncomingSignal(payload) {
   if (!payload || typeof payload.kind !== "string") return;
-  if (payload.kind === "offer") {
-    await handleOfferSignal(payload.description);
-    return;
-  }
-  if (payload.kind === "answer") {
-    await handleAnswerSignal(payload.description);
-    return;
-  }
-  if (payload.kind === "ice-candidate") {
-    await handleIceCandidateSignal(payload.candidate);
-    return;
-  }
-  if (payload.kind === "resign") {
-    handleRemoteResignNotice(payload);
+  try {
+    if (payload.kind === "offer") {
+      await handleOfferSignal(payload.description);
+      return;
+    }
+    if (payload.kind === "answer") {
+      await handleAnswerSignal(payload.description);
+      return;
+    }
+    if (payload.kind === "ice-candidate") {
+      await handleIceCandidateSignal(payload.candidate);
+      return;
+    }
+    if (payload.kind === "resign") {
+      handleRemoteResignNotice(payload);
+    }
+  } catch (error) {
+    state.message = `Signal handling failed: ${error?.message || "unexpected error"}.`;
+    scheduleHostNegotiationRetry({
+      delayMs: HOST_NEGOTIATION_RETRY_MS,
+      reason: "Recovering from signaling error.",
+      iceRestart: true,
+    });
+    updateNetworkStatus();
+    render();
   }
 }
 
@@ -2637,6 +2988,8 @@ async function handleSignalingMessage(rawData) {
   if (message.type === "joined") {
     rtc.roomId = normalizeRoomCode(message.roomId || rtc.roomId) || rtc.roomId;
     rtc.peerCount = Number.isInteger(message.peerCount) ? message.peerCount : rtc.peerCount;
+    rtc.signalingReconnectAttempts = 0;
+    clearSignalingReconnectTimer();
     rtc.role = message.role === "host" ? "host" : "guest";
     state.localSide = rtc.role === "host" ? "player" : "ai";
     applyRoomRoster(message.players);
@@ -2647,7 +3000,10 @@ async function handleSignalingMessage(rawData) {
       ensureHostPeerConnection();
       state.message = `Room ${rtc.roomId} created. Waiting for ${sideLabel("ai")}.`;
       if (rtc.peerCount > 1) {
-        await startHostNegotiation();
+        await startHostNegotiation({
+          reason: "Peer already present in room.",
+          iceRestart: false,
+        });
       }
     } else {
       ensureGuestPeerConnection();
@@ -2668,7 +3024,10 @@ async function handleSignalingMessage(rawData) {
       state.message = `${sideLabel("ai")} joined. Starting connection...`;
       updateNetworkStatus();
       render();
-      await startHostNegotiation();
+      await startHostNegotiation({
+        reason: "Peer joined room.",
+        iceRestart: false,
+      });
     } else {
       updateNetworkStatus();
       render();
@@ -2773,6 +3132,9 @@ async function connectToRoom(roomValue) {
   }
 
   clearPeerSession();
+  rtc.manualDisconnect = false;
+  rtc.signalingReconnectAttempts = 0;
+  rtc.signalingBaseUrl = signalingBaseUrl;
   state.gameMode = "p2p";
   state.playerNames[state.localSide] = state.localPlayerName;
   rtc.roomId = roomId;
@@ -2803,6 +3165,7 @@ async function createRoomAndConnect() {
 
 function disconnectPeerSession() {
   const previousRoomId = rtc.roomId;
+  rtc.manualDisconnect = true;
   clearPeerSession();
   rtc.roomId = "";
   state.gameMode = "ai";
