@@ -4,7 +4,7 @@ const STORAGE_KEY = "bg-save";
 const PROFILE_STORAGE_KEY = "bg-profile";
 const AI_MOVE_TOTAL_MS = 3000;
 const AI_MOVE_MIN_STEP_MS = 450;
-const COMMIT_VERSION = "V2026-02-10-2";
+const COMMIT_VERSION = "V2026-02-10-3";
 const SIGNALING_BASE_URL = "https://bg-rendezvous.hilbert.workers.dev";
 const SIGNALING_RECONNECT_BASE_MS = 700;
 const SIGNALING_RECONNECT_MAX_MS = 8000;
@@ -45,6 +45,8 @@ const state = {
   networkModalOpen: false,
   remoteSyncInProgress: false,
   lastSyncedPayload: "",
+  lastSyncedStateFingerprint: "",
+  syncSeq: 0,
   availableRooms: [],
   roomsLoading: false,
   roomsError: "",
@@ -468,6 +470,8 @@ function initBoard() {
   state.resignedBySide = "";
   state.playerNames[state.localSide] = state.localPlayerName;
   state.message = "Opening roll: click the dice to decide who starts.";
+  state.lastSyncedPayload = "";
+  state.lastSyncedStateFingerprint = "";
   closeResignModal({ renderAfter: false });
   render();
   syncGameStateToPeer();
@@ -1609,6 +1613,7 @@ function saveStateToStorage() {
     gameOver: state.gameOver === true,
     winnerSide: state.winnerSide,
     resignedBySide: state.resignedBySide,
+    syncSeq: state.syncSeq,
     localPlayerName: state.localPlayerName,
     playerNames: {
       player: getPlayerName("player"),
@@ -1648,6 +1653,7 @@ function loadStateFromStorage() {
   state.resignedBySide = payload.resignedBySide === "ai" || payload.resignedBySide === "player"
     ? payload.resignedBySide
     : "";
+  state.syncSeq = normalizeSyncSeq(payload.syncSeq) ?? 0;
   state.localPlayerName = normalizePlayerName(
     payload.localPlayerName || state.localPlayerName,
   );
@@ -1662,6 +1668,8 @@ function loadStateFromStorage() {
   state.selectedFrom = null;
   state.message = "Loaded saved game.";
   state.lastMoveSnapshot = null;
+  state.lastSyncedPayload = "";
+  state.lastSyncedStateFingerprint = buildSyncStateFingerprint(state);
   render();
   syncGameStateToPeer();
 }
@@ -2444,6 +2452,8 @@ function clearPeerSession() {
   rtc.peerCount = 0;
   rtc.generatedSignal = "";
   state.lastSyncedPayload = "";
+  state.lastSyncedStateFingerprint = "";
+  state.syncSeq = 0;
 }
 
 function openSignalingSocket(baseUrl, roomId, playerName = "") {
@@ -2583,50 +2593,104 @@ function sendPlayerNameToSignaling({ name = state.localPlayerName, claim = false
   }
 }
 
+function normalizeSyncSeq(rawValue) {
+  if (Number.isInteger(rawValue) && rawValue >= 0) {
+    return rawValue;
+  }
+  return null;
+}
+
+function buildSyncStateFingerprint(source) {
+  const board = Array.isArray(source?.board) ? source.board : [];
+  const dice = Array.isArray(source?.dice) ? source.dice : [];
+  const diceOwners = Array.isArray(source?.diceOwners) ? source.diceOwners : [];
+  const remainingDice = Array.isArray(source?.remainingDice) ? source.remainingDice : [];
+  const bar = source?.bar && typeof source.bar === "object"
+    ? source.bar
+    : { player: 0, ai: 0 };
+  const off = source?.off && typeof source.off === "object"
+    ? source.off
+    : { player: 0, ai: 0 };
+  return JSON.stringify({
+    board,
+    bar: {
+      player: Number(bar.player || 0),
+      ai: Number(bar.ai || 0),
+    },
+    off: {
+      player: Number(off.player || 0),
+      ai: Number(off.ai || 0),
+    },
+    turn: source?.turn === "ai" ? "ai" : "player",
+    dice,
+    diceOwners,
+    remainingDice,
+    awaitingRoll: source?.awaitingRoll === true,
+    openingRollPending: source?.openingRollPending === true,
+    showNoMoveDice: source?.showNoMoveDice === true,
+    gameOver: source?.gameOver === true,
+    winnerSide: source?.winnerSide === "ai" ? "ai" : (source?.winnerSide === "player" ? "player" : ""),
+    resignedBySide: source?.resignedBySide === "ai"
+      ? "ai"
+      : (source?.resignedBySide === "player" ? "player" : ""),
+  });
+}
+
 function applyRemoteGameState(payload) {
   if (!payload) return;
+  const incomingSyncSeq = normalizeSyncSeq(payload.syncSeq);
+  if (incomingSyncSeq !== null && incomingSyncSeq < state.syncSeq) {
+    return;
+  }
   state.remoteSyncInProgress = true;
-  state.board = [...payload.board];
-  state.bar = { ...payload.bar };
-  state.off = { ...payload.off };
-  state.turn = payload.turn;
-  state.dice = [...payload.dice];
-  state.diceOwners = [...payload.diceOwners];
-  state.remainingDice = [...payload.remainingDice];
-  state.awaitingRoll = payload.awaitingRoll;
-  state.openingRollPending = payload.openingRollPending === true;
-  state.showNoMoveDice = payload.showNoMoveDice === true;
-  state.gameOver = payload.gameOver === true;
-  state.winnerSide = payload.winnerSide === "ai" || payload.winnerSide === "player"
-    ? payload.winnerSide
-    : "";
-  state.resignedBySide = payload.resignedBySide === "ai" || payload.resignedBySide === "player"
-    ? payload.resignedBySide
-    : "";
-  if (state.gameOver) {
-    state.autoDiceEnabled = false;
-    closeResignModal({ renderAfter: false });
+  try {
+    state.board = [...payload.board];
+    state.bar = { ...payload.bar };
+    state.off = { ...payload.off };
+    state.turn = payload.turn;
+    state.dice = [...payload.dice];
+    state.diceOwners = [...payload.diceOwners];
+    state.remainingDice = [...payload.remainingDice];
+    state.awaitingRoll = payload.awaitingRoll;
+    state.openingRollPending = payload.openingRollPending === true;
+    state.showNoMoveDice = payload.showNoMoveDice === true;
+    state.gameOver = payload.gameOver === true;
+    state.winnerSide = payload.winnerSide === "ai" || payload.winnerSide === "player"
+      ? payload.winnerSide
+      : "";
+    state.resignedBySide = payload.resignedBySide === "ai" || payload.resignedBySide === "player"
+      ? payload.resignedBySide
+      : "";
+    if (state.gameOver) {
+      state.autoDiceEnabled = false;
+      closeResignModal({ renderAfter: false });
+    }
+    const senderSide = payload.senderSide === "ai" ? "ai" : "player";
+    const senderName = normalizePlayerName(payload.senderName || "");
+    state.playerNames[senderSide] = senderName;
+    if (state.gameOver && state.resignedBySide) {
+      const resignedName = normalizePlayerName(state.playerNames[state.resignedBySide] || "");
+      const resignedLabel = resignedName
+        ? `Player (${resignedName})`
+        : sideLabel(state.resignedBySide);
+      state.message = state.resignedBySide === state.localSide
+        ? `You resigned. ${capitalizeSide(otherSide(state.resignedBySide))} wins! Press New Game to play again.`
+        : `${resignedLabel} resigned. ${capitalizeSide(otherSide(state.resignedBySide))} wins! Press New Game to play again.`;
+    } else {
+      state.message = payload.message || state.message;
+    }
+    state.selectedFrom = null;
+    state.lastMoveSnapshot = null;
+    state.aiMoveHighlights = { from: [], to: [] };
+    if (incomingSyncSeq !== null) {
+      state.syncSeq = Math.max(state.syncSeq, incomingSyncSeq);
+    }
+    state.lastSyncedStateFingerprint = buildSyncStateFingerprint(payload);
+    state.lastSyncedPayload = "";
+    render();
+  } finally {
+    state.remoteSyncInProgress = false;
   }
-  const senderSide = payload.senderSide === "ai" ? "ai" : "player";
-  const senderName = normalizePlayerName(payload.senderName || "");
-  state.playerNames[senderSide] = senderName;
-  if (state.gameOver && state.resignedBySide) {
-    const resignedName = normalizePlayerName(state.playerNames[state.resignedBySide] || "");
-    const resignedLabel = resignedName
-      ? `Player (${resignedName})`
-      : sideLabel(state.resignedBySide);
-    state.message = state.resignedBySide === state.localSide
-      ? `You resigned. ${capitalizeSide(otherSide(state.resignedBySide))} wins! Press New Game to play again.`
-      : `${resignedLabel} resigned. ${capitalizeSide(otherSide(state.resignedBySide))} wins! Press New Game to play again.`;
-  } else {
-    state.message = payload.message || state.message;
-  }
-  state.selectedFrom = null;
-  state.lastMoveSnapshot = null;
-  state.aiMoveHighlights = { from: [], to: [] };
-  state.lastSyncedPayload = JSON.stringify(payload);
-  render();
-  state.remoteSyncInProgress = false;
 }
 
 function buildSyncPayload() {
@@ -2644,6 +2708,7 @@ function buildSyncPayload() {
     gameOver: state.gameOver === true,
     winnerSide: state.winnerSide,
     resignedBySide: state.resignedBySide,
+    syncSeq: state.syncSeq,
     senderSide: state.localSide,
     senderName: state.localPlayerName,
     message: state.message,
@@ -2655,6 +2720,12 @@ function syncGameStateToPeer(force = false) {
   if (state.remoteSyncInProgress) return;
 
   const payload = buildSyncPayload();
+  const nextFingerprint = buildSyncStateFingerprint(payload);
+  if (nextFingerprint !== state.lastSyncedStateFingerprint) {
+    state.syncSeq += 1;
+    state.lastSyncedStateFingerprint = nextFingerprint;
+    payload.syncSeq = state.syncSeq;
+  }
   const encoded = JSON.stringify(payload);
   if (!force && encoded === state.lastSyncedPayload) return;
   let sent = false;
@@ -2986,15 +3057,28 @@ async function handleSignalingMessage(rawData) {
   }
 
   if (message.type === "joined") {
-    rtc.roomId = normalizeRoomCode(message.roomId || rtc.roomId) || rtc.roomId;
+    const previousRoomId = rtc.roomId;
+    const previousRole = rtc.role;
+    const joinedRoomId = normalizeRoomCode(message.roomId || rtc.roomId) || rtc.roomId;
+    const joinedRole = message.role === "host" ? "host" : "guest";
+    const isSignalingRejoin = Boolean(
+      previousRoomId
+      && previousRole
+      && previousRoomId === joinedRoomId
+      && previousRole === joinedRole,
+    );
+    rtc.roomId = joinedRoomId;
     rtc.peerCount = Number.isInteger(message.peerCount) ? message.peerCount : rtc.peerCount;
     rtc.signalingReconnectAttempts = 0;
     clearSignalingReconnectTimer();
-    rtc.role = message.role === "host" ? "host" : "guest";
+    rtc.role = joinedRole;
     state.localSide = rtc.role === "host" ? "player" : "ai";
     applyRoomRoster(message.players);
     if (message.roomState && typeof message.roomState === "object") {
-      applyRemoteGameState(message.roomState);
+      const roomStateHasSyncSeq = normalizeSyncSeq(message.roomState.syncSeq) !== null;
+      if (!isSignalingRejoin || roomStateHasSyncSeq) {
+        applyRemoteGameState(message.roomState);
+      }
     }
     if (rtc.role === "host") {
       ensureHostPeerConnection();

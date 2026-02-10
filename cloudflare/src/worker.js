@@ -83,6 +83,9 @@ function normalizeRoomStatePayload(rawPayload) {
   if (!Array.isArray(rawPayload.dice)) return null;
   if (!Array.isArray(rawPayload.diceOwners)) return null;
   if (!Array.isArray(rawPayload.remainingDice)) return null;
+  const syncSeq = Number.isInteger(rawPayload.syncSeq) && rawPayload.syncSeq >= 0
+    ? rawPayload.syncSeq
+    : 0;
 
   return {
     board: rawPayload.board,
@@ -98,6 +101,7 @@ function normalizeRoomStatePayload(rawPayload) {
     gameOver: rawPayload.gameOver === true,
     winnerSide: rawPayload.winnerSide === "ai" ? "ai" : (rawPayload.winnerSide === "player" ? "player" : ""),
     resignedBySide: rawPayload.resignedBySide === "ai" ? "ai" : (rawPayload.resignedBySide === "player" ? "player" : ""),
+    syncSeq,
     senderSide: rawPayload.senderSide === "ai" ? "ai" : "player",
     senderName: normalizePlayerName(rawPayload.senderName || ""),
     message: String(rawPayload.message || "").slice(0, 220),
