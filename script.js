@@ -4,7 +4,7 @@ const STORAGE_KEY = "bg-save";
 const PROFILE_STORAGE_KEY = "bg-profile";
 const AI_MOVE_TOTAL_MS = 3000;
 const AI_MOVE_MIN_STEP_MS = 450;
-const COMMIT_VERSION = "V2026-02-09-8";
+const COMMIT_VERSION = "V2026-02-10-1";
 const SIGNALING_BASE_URL = "https://bg-rendezvous.hilbert.workers.dev";
 const RTC_CONFIG = {
   iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
@@ -470,6 +470,9 @@ function rollDie() {
 }
 
 function rollForTurn() {
+  if (state.gameMode === "p2p" && !canLocalRoll()) {
+    return;
+  }
   if (state.gameOver) {
     state.message = "Game is over. Start a new game.";
     render();
@@ -553,9 +556,12 @@ function handleOpeningRoll() {
     state.showNoMoveDice = true;
     state.lastMoveSnapshot = null;
     state.turn = otherSide(winner);
+    state.awaitingRoll = true;
     render();
     syncGameStateToPeer();
-    setTimeout(rollForTurn, 500);
+    if (isAiControlledTurn()) {
+      setTimeout(rollForTurn, 500);
+    }
     return;
   }
 
@@ -1104,7 +1110,7 @@ function endTurn() {
     render();
     return;
   }
-  if (hasAnyLegalMoves(state, "player", state.remainingDice)) {
+  if (hasAnyLegalMoves(state, state.turn, state.remainingDice)) {
     state.message = "You must play all usable dice before ending your turn.";
     render();
     return;
