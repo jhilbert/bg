@@ -4,7 +4,7 @@ const STORAGE_KEY = "bg-save";
 const PROFILE_STORAGE_KEY = "bg-profile";
 const AI_MOVE_TOTAL_MS = 3000;
 const AI_MOVE_MIN_STEP_MS = 450;
-const COMMIT_VERSION = "V2026-02-11-1";
+const COMMIT_VERSION = "V2026-02-11-2";
 const SIGNALING_BASE_URL = "https://bg-rendezvous.hilbert.workers.dev";
 const SIGNALING_RECONNECT_BASE_MS = 700;
 const SIGNALING_RECONNECT_MAX_MS = 8000;
@@ -72,6 +72,9 @@ const rtc = {
   peerCount: 0,
   pendingRemoteCandidates: [],
   generatedSignal: "",
+  autoRejoinInFlight: false,
+  autoRejoinBlockedRoomId: "",
+  autoRejoinBlockedUpdatedAt: 0,
 };
 
 let autoDiceRollTimer = null;
@@ -1959,6 +1962,56 @@ function normalizeRoomDirectory(payload) {
   return normalizedRooms;
 }
 
+function findAutoRejoinRoom(
+  rooms,
+  { excludedRoomId = "", excludedUpdatedAt = 0 } = {},
+) {
+  const localName = normalizePlayerName(state.localPlayerName);
+  if (!localName || !Array.isArray(rooms)) return null;
+  for (const room of rooms) {
+    if (!room || room.playerCount !== 1 || !Array.isArray(room.players)) continue;
+    if (room.roomId === excludedRoomId && room.updatedAt === excludedUpdatedAt) continue;
+    const hasExactNameMatch = room.players.some((player) => {
+      const playerName = normalizePlayerName(player?.name || "");
+      return playerName === localName;
+    });
+    if (hasExactNameMatch) {
+      return room;
+    }
+  }
+  return null;
+}
+
+async function maybeAutoRejoinRoom(rooms) {
+  if (rtc.autoRejoinInFlight) return;
+  if (rtc.manualDisconnect) return;
+  if (state.gameMode === "p2p" && rtc.roomId) return;
+  if (isSignalingOpen() || isSignalingConnecting()) return;
+
+  const candidateRoom = findAutoRejoinRoom(rooms, {
+    excludedRoomId: rtc.autoRejoinBlockedRoomId,
+    excludedUpdatedAt: rtc.autoRejoinBlockedUpdatedAt,
+  });
+  if (!candidateRoom) return;
+
+  const blockedUpdatedAt = Number.isFinite(candidateRoom.updatedAt) ? candidateRoom.updatedAt : 0;
+  rtc.autoRejoinInFlight = true;
+  state.message = `Rejoining room ${candidateRoom.roomId}...`;
+  render();
+  try {
+    await connectToRoom(candidateRoom.roomId);
+    rtc.autoRejoinBlockedRoomId = "";
+    rtc.autoRejoinBlockedUpdatedAt = 0;
+  } catch (error) {
+    rtc.autoRejoinBlockedRoomId = candidateRoom.roomId;
+    rtc.autoRejoinBlockedUpdatedAt = blockedUpdatedAt;
+    state.message = error?.message || `Failed to rejoin room ${candidateRoom.roomId}.`;
+    render();
+  } finally {
+    rtc.autoRejoinInFlight = false;
+  }
+}
+
 function roomRoleLabel(role) {
   return role === "guest" ? "Guest" : "Host";
 }
@@ -2021,6 +2074,7 @@ async function fetchAvailableRooms({ silent = false } = {}) {
     }
     state.availableRooms = normalizeRoomDirectory(payload);
     state.roomsError = "";
+    await maybeAutoRejoinRoom(state.availableRooms);
   } catch (error) {
     if (!silent) {
       state.roomsError = error.message || "Failed to load rooms.";
@@ -3216,6 +3270,8 @@ async function connectToRoom(roomValue) {
   }
 
   clearPeerSession();
+  rtc.autoRejoinBlockedRoomId = "";
+  rtc.autoRejoinBlockedUpdatedAt = 0;
   rtc.manualDisconnect = false;
   rtc.signalingReconnectAttempts = 0;
   rtc.signalingBaseUrl = signalingBaseUrl;
@@ -3279,7 +3335,10 @@ async function handleJoinRoom(roomId) {
 async function prefillSignalFromQuery() {
   const params = new URLSearchParams(window.location.search);
   const room = normalizeRoomCode(params.get("room") || "");
-  if (!room) return;
+  if (!room) {
+    void fetchAvailableRooms({ silent: true });
+    return;
+  }
 
   state.gameMode = "p2p";
   state.message = `Room ${room} detected. Connecting...`;
