@@ -4,7 +4,7 @@ const STORAGE_KEY = "bg-save";
 const PROFILE_STORAGE_KEY = "bg-profile";
 const AI_MOVE_TOTAL_MS = 3000;
 const AI_MOVE_MIN_STEP_MS = 450;
-const COMMIT_VERSION = "V2026-02-11-2";
+const COMMIT_VERSION = "V2026-02-11-3";
 const SIGNALING_BASE_URL = "https://bg-rendezvous.hilbert.workers.dev";
 const SIGNALING_RECONNECT_BASE_MS = 700;
 const SIGNALING_RECONNECT_MAX_MS = 8000;
@@ -480,13 +480,29 @@ function initBoard() {
   syncGameStateToPeer();
 }
 
-function rollDie() {
-  if (window.crypto && window.crypto.getRandomValues) {
-    const array = new Uint32Array(1);
-    window.crypto.getRandomValues(array);
-    return (array[0] % 6) + 1;
+function randomIntInclusive(min, max) {
+  const low = Math.ceil(min);
+  const high = Math.floor(max);
+  if (high < low) {
+    throw new Error("Invalid random range.");
   }
-  return Math.floor(Math.random() * 6) + 1;
+  const span = high - low + 1;
+  if (span <= 1) return low;
+
+  if (window.crypto?.getRandomValues) {
+    const limit = Math.floor(0x100000000 / span) * span;
+    const array = new Uint32Array(1);
+    do {
+      window.crypto.getRandomValues(array);
+    } while (array[0] >= limit);
+    return low + (array[0] % span);
+  }
+
+  return low + Math.floor(Math.random() * span);
+}
+
+function rollDie() {
+  return randomIntInclusive(1, 6);
 }
 
 function rollForTurn() {
